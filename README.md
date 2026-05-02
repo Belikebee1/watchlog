@@ -61,7 +61,27 @@ systemctl list-timers watchlog
 | `stdout` | terminal (rich/colored) | manual runs, CI |
 | `email` | SMTP | scheduled runs |
 | `telegram` | Telegram bot | interactive notifications with buttons (in v0.2) |
-| `json` | JSON file | machine consumption |
+| `json` | JSON file (per-day archive) | machine consumption / audit |
+| `status_file` | small JSON heartbeat | dead-man's-switch — serve as public URL, monitor externally |
+
+### Heartbeat / dead-man's-switch
+
+The `status_file` reporter writes a small `status.json` after every run. Mount that file under a public URL (e.g. via Nginx) and any external monitor can poll it to confirm watchlog itself is still firing. Schema:
+
+```json
+{
+  "schema_version": 1,
+  "ran_at": "2026-05-02T07:46:44+00:00",
+  "host": "myserver",
+  "watchlog_version": "0.1.0",
+  "worst_severity": "WARN",
+  "checks_total": 9,
+  "counts": {"OK": 7, "INFO": 1, "WARN": 1, "CRITICAL": 0},
+  "actionable": [{"check": "...", "severity": "...", "title": "..."}]
+}
+```
+
+If `ran_at` becomes stale (older than your timer interval + grace), the timer has stopped firing — investigate immediately.
 
 ## Configuration
 
