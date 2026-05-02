@@ -1,57 +1,98 @@
 # watchlog
 
-Server health and security monitor for Linux servers. Single-file Python tool that runs daily checks (apt updates, SSL certs, services, disk, mail blacklists, etc.) and sends notifications via email or Telegram.
+Server health and security monitor for Linux servers. Python tool that runs scheduled checks (apt updates, SSL certs, services, disk, mail blacklists, SSH brute-force, etc.) and sends notifications via email — or, paired with `unattended-upgrades`, gives you fully-automated security patching with no SSH session needed.
 
 Built for self-hosted setups where you want to know **what needs attention without logging in to check**.
+
+🌐 **Landing page:** [watchlog.pl](https://watchlog.pl) (also in Polish at [watchlog.pl/pl/](https://watchlog.pl/pl/))
 
 ## Features
 
 - 🔒 **Security-focused** — APT security updates flagged as critical, IP blacklist monitoring, SSH brute-force detection
+- 🤫 **No spam** — email only when something is actually wrong, configurable severity threshold
 - 🔌 **Pluggable** — checks and reporters are independent modules, easy to add new ones
-- 📧 **Multi-channel notifications** — email (SMTP), Telegram bot (with action buttons), stdout, JSON
-- ⏰ **systemd-native** — installs as systemd timer for daily runs
-- 🚦 **Severity levels** — only notifies when `WARN` or `CRITICAL` (no spam in quiet times)
-- 📋 **Audit trail** — every run logged to `/var/log/watchlog/`
+- 📧 **Multi-channel notifications** — email (SMTP), Telegram bot (with action buttons, v0.2), stdout, JSON
+- ⏰ **systemd-native** — installs as systemd timer (default: every 4 hours)
+- 📋 **Audit trail** — every run archived as JSON in `/var/log/watchlog/`
+- 💓 **Heartbeat** — optional public `/status.json` for external dead-man's-switch monitoring
 
 ## Quick start
 
 ```bash
-# Install (latest from main)
+# 1. Install (latest from main)
 pip install git+https://github.com/Belikebee1/watchlog.git
 
-# Or for development
-git clone https://github.com/Belikebee1/watchlog.git
-cd watchlog
-pip install -e ".[dev]"
-
-# Configure
+# 2. Configure
 sudo mkdir -p /etc/watchlog
-sudo cp config.example.yaml /etc/watchlog/config.yaml
+sudo curl -o /etc/watchlog/config.yaml \
+  https://raw.githubusercontent.com/Belikebee1/watchlog/main/config.example.yaml
 sudo $EDITOR /etc/watchlog/config.yaml
 
-# Run once (manual)
+# 3. Run once to verify
 sudo watchlog run
 
-# Install as systemd timer (daily 08:00)
+# 4. Enable systemd timer (every 4 hours by default)
 sudo watchlog install
-
-# Check timer status
 systemctl list-timers watchlog
+
+# 5. Pair with unattended-upgrades for auto-patching (recommended)
+echo 'APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades
+
+sudo sed -i 's|//Unattended-Upgrade::Mail "";|Unattended-Upgrade::Mail "you@example.com";|' \
+    /etc/apt/apt.conf.d/50unattended-upgrades
+
+systemctl list-timers apt-daily-upgrade watchlog
 ```
+
+## How it works in practice
+
+watchlog only **detects** and **notifies**. To actually **apply** security patches automatically, pair it with `unattended-upgrades` (Ubuntu's built-in tool, often disabled by default). Together they give you end-to-end automated security with no SSH session needed.
+
+### Typical security update — start to finish
+
+```
+🔘  14:00 UTC  Ubuntu releases security update
+                  └─ package appears in -security suite
+                  └─ Hetzner / your mirror syncs within ~30 min
+       │
+🔘  16:00 UTC  watchlog runs (every 4 hours)
+                  └─ detects via `apt list --upgradable`
+                  └─ escalates to CRITICAL severity
+                  └─ 📧 email: "1 security update available"
+                  └─ 📋 /status.json heartbeat updated
+       │
+🔘  06:00 UTC next day  unattended-upgrades runs (daily)
+                  └─ installs only -security packages
+                  └─ reboots if kernel update (default 03:30, won't reboot if users logged in)
+                  └─ 📧 email: "Successfully installed: php8.3-fpm"
+       │
+🔘  08:00 UTC  watchlog runs again
+                  └─ confirms security update is gone
+                  └─ severity drops back to OK
+```
+
+**Total time-to-patch: ~16 hours** from Ubuntu release to fully patched, fully automatic.
+
+### Two cooperating timers
+
+| Timer | Schedule | Role | Outputs |
+|---|---|---|---|
+| **`watchlog.timer`** | every 4 hours (00, 04, 08, 12, 16, 20 UTC) | Detects + notifies | email when WARN/CRITICAL · `/status.json` · `/var/log/watchlog/*.json` |
+| **`apt-daily-upgrade.timer`** | daily ~06:00 UTC | Installs security updates | email on change · auto-reboot if kernel update · `/var/log/unattended-upgrades/` |
 
 ## Checks
 
 | Name | What it checks | Default severity |
 |---|---|---|
-| `apt_updates` | apt list of upgradable packages | INFO |
-| `apt_security` | apt security updates available | CRITICAL |
+| `apt_updates` | upgradable packages, with security flag escalation | CRITICAL on security |
 | `ssl_certs` | Let's Encrypt cert expiry | WARN <30d, CRITICAL <7d |
-| `disk_space` | filesystem usage | WARN >80%, CRITICAL >90% |
-| `memory` | free RAM | WARN <500MB |
-| `services` | configured services must be `active` | CRITICAL if not |
-| `docker_images` | digest vs `:latest` for configured images | INFO if newer available |
+| `disk_space` | filesystem usage per mount | WARN >80%, CRITICAL >90% |
+| `memory` | free RAM (`MemAvailable`) | WARN <500MB |
+| `services` | configured services must be `active` | CRITICAL if down |
+| `docker_images` | local digest vs registry `:latest` | INFO if outdated |
 | `ip_blacklist` | Spamhaus, Barracuda, SpamCop, SORBS | CRITICAL if listed |
-| `dns_records` | SPF/DKIM/DMARC/A/MX presence | CRITICAL if missing |
+| `dns_records` | SPF/DKIM/DMARC/MX/A presence regression | CRITICAL if missing |
 | `ssh_brute` | failed SSH logins in last 24h | WARN >threshold |
 
 ## Reporters
@@ -60,8 +101,8 @@ systemctl list-timers watchlog
 |---|---|---|
 | `stdout` | terminal (rich/colored) | manual runs, CI |
 | `email` | SMTP | scheduled runs |
-| `telegram` | Telegram bot | interactive notifications with buttons (in v0.2) |
-| `json` | JSON file (per-day archive) | machine consumption / audit |
+| `telegram` | Telegram bot | interactive notifications with buttons (v0.2) |
+| `json` | JSON file (per-day archive in `/var/log/watchlog/`) | audit / machine consumption |
 | `status_file` | small JSON heartbeat | dead-man's-switch — serve as public URL, monitor externally |
 
 ### Heartbeat / dead-man's-switch
@@ -85,18 +126,24 @@ If `ran_at` becomes stale (older than your timer interval + grace), the timer ha
 
 ## Configuration
 
-See [config.example.yaml](config.example.yaml) for a full example.
+See [`config.example.yaml`](config.example.yaml) for the full reference.
 
 ```yaml
 notifications:
   email:
+    enabled: true
     to: you@example.com
     smtp_host: 127.0.0.1
     only_when: warn  # ok / info / warn / critical
 
-checks:
-  apt_security:
+  status_file:
     enabled: true
+    path: /var/www/html/watchlog/status.json  # serve at https://your-domain/status.json
+
+checks:
+  apt_updates:
+    enabled: true
+    security_severity: critical
   ssl_certs:
     enabled: true
     paths: [/etc/letsencrypt/live]
@@ -109,12 +156,19 @@ checks:
 ```
 watchlog/
 ├── src/watchlog/
-│   ├── core/          # config, severity, runner
-│   ├── checks/        # one file = one check
-│   ├── reporters/     # output channels
-│   └── cli.py         # CLI entry point
-└── ops/systemd/       # unit + timer files
+│   ├── core/          # config, severity, runner, check base
+│   ├── checks/        # one file = one check (apt_updates, ssl_certs, ...)
+│   ├── reporters/     # output channels (email, status_file, ...)
+│   └── cli.py         # CLI entry point (run, list-checks, install)
+└── ops/systemd/       # systemd unit + timer templates
 ```
+
+## Roadmap
+
+- ✅ **v0.1** — 9 checks, stdout/email/JSON/status_file reporters, systemd installer
+- 🤖 **v0.2** — Telegram bot reporter with interactive buttons (Apply / Postpone / Ignore)
+- 📱 **v0.3** — REST API daemon, web dashboard, action endpoints for mobile clients
+- 🛡️ **v0.4** — fail2ban stats, open-ports baseline diff, file integrity (AIDE), CVE matching
 
 ## License
 
