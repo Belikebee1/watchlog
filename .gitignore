@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local config (per-server, never commit)
+config.yaml
+config.local.yaml
+*.local.yaml
+
+# Runtime
+state/
+*.log
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db

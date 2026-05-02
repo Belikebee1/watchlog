@@ -1,0 +1,98 @@
+# watchlog configuration
+# Copy to /etc/watchlog/config.yaml and edit.
+
+# Notifications — where reports get sent
+notifications:
+  # Email reporter
+  email:
+    enabled: true
+    to: you@example.com
+    from: watchlog@example.com
+    smtp_host: 127.0.0.1
+    smtp_port: 25
+    smtp_user: ""        # empty = no auth (local Postfix)
+    smtp_password: ""
+    smtp_starttls: false
+    # Send mail only when worst result is at this severity or higher
+    only_when: warn      # ok / info / warn / critical
+
+  # Telegram reporter (v0.2 — coming soon)
+  telegram:
+    enabled: false
+    bot_token: ""        # from @BotFather
+    chat_id: ""          # from @userinfobot
+    only_when: warn
+
+# Per-check configuration. Disable any check by setting enabled: false.
+checks:
+  apt_updates:
+    enabled: true
+    # If a security update appears, escalate to critical
+    security_severity: critical
+
+  ssl_certs:
+    enabled: true
+    paths:
+      - /etc/letsencrypt/live
+    warn_days: 30
+    critical_days: 7
+
+  disk_space:
+    enabled: true
+    warn_pct: 80
+    critical_pct: 90
+    # Mountpoints to ignore (snap, tmpfs, etc.)
+    ignore:
+      - /snap
+      - /run
+
+  memory:
+    enabled: true
+    warn_mb_free: 500
+    critical_mb_free: 100
+
+  services:
+    enabled: true
+    must_be_active:
+      - postfix
+      - dovecot
+      - opendkim
+      - nginx
+      - docker
+      - php8.3-fpm
+      - fail2ban
+
+  docker_images:
+    enabled: true
+    images:
+      - postgres:16-alpine
+      - n8nio/n8n:latest
+      - axllent/mailpit
+
+  ip_blacklist:
+    enabled: true
+    ip: ""  # auto-detect if empty
+    lists:
+      - zen.spamhaus.org
+      - bl.spamcop.net
+      - b.barracudacentral.org
+      - dnsbl.sorbs.net
+
+  dns_records:
+    enabled: true
+    domains:
+      - example.com
+    require:
+      - mx
+      - spf
+      - dmarc
+
+  ssh_brute:
+    enabled: true
+    threshold_24h: 1000  # alert if more failed logins than this
+    log_path: /var/log/auth.log
+
+# State storage — where reports get archived
+state:
+  log_dir: /var/log/watchlog
+  retain_days: 90
