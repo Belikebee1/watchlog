@@ -36,8 +36,25 @@ SS_LINE = re.compile(
 PROC_RE = re.compile(r'"([^"]+)"')
 
 
+def _is_ephemeral_localhost(addr: str) -> bool:
+    """High random ports bound to localhost — runtime-internal stuff that varies
+    between restarts (containerd, vscode-server, dev runtimes). Not security-relevant."""
+    if not addr.startswith(("127.", "[::1]:")):
+        return False
+    try:
+        port = int(addr.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        return False
+    # Linux ephemeral port range starts at 32768 by default.
+    return port >= 32768
+
+
 def _snapshot_ports() -> set[str]:
-    """Return a set of ``addr|process`` strings — one per listening socket."""
+    """Return a set of ``addr|process`` strings — one per listening socket.
+
+    Filters out ephemeral high ports bound to localhost (containerd, IDE servers,
+    etc.) since they vary between restarts and aren't security-relevant.
+    """
     try:
         proc = subprocess.run(
             ["ss", "-tlnpH"],
@@ -55,8 +72,10 @@ def _snapshot_ports() -> set[str]:
         if not m:
             continue
         addr = m.group("addr")
+        if _is_ephemeral_localhost(addr):
+            continue
         users = m.group("users") or ""
-        # Process name (drop pid/fd)
+        # Sort + dedupe process names for stable comparison
         names = sorted(set(PROC_RE.findall(users)))
         proc_str = ",".join(names) if names else "?"
         snapshot.add(f"{addr}|{proc_str}")

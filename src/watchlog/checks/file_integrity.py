@@ -58,9 +58,10 @@ class FileIntegrityCheck(Check):
             )
 
         timeout_s = int(self.config.get("timeout_s", 600))
+        config_path = self.config.get("config_path", "/etc/aide/aide.conf")
         try:
             proc = subprocess.run(
-                ["aide", "--check"],
+                ["aide", f"--config={config_path}", "--check"],
                 capture_output=True,
                 text=True,
                 timeout=timeout_s,
