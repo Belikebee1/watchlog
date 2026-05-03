@@ -75,9 +75,11 @@ def _snapshot_ports() -> set[str]:
         if _is_ephemeral_localhost(addr):
             continue
         users = m.group("users") or ""
-        # Sort + dedupe process names for stable comparison
+        # Use only the first (parent) process name. Daemons like Postfix spawn
+        # children (smtpd) that share the listening socket; their presence
+        # varies with traffic. Tracking only the parent gives a stable signal.
         names = sorted(set(PROC_RE.findall(users)))
-        proc_str = ",".join(names) if names else "?"
+        proc_str = names[0] if names else "?"
         snapshot.add(f"{addr}|{proc_str}")
     return snapshot
 
