@@ -11,6 +11,7 @@ from watchlog.core.check import CheckResult
 from watchlog.core.runner import register_reporter
 from watchlog.core.severity import Severity
 from watchlog.reporters.base import Reporter
+from watchlog.state import State
 
 
 @register_reporter("email")
@@ -21,12 +22,19 @@ class EmailReporter(Reporter):
         if not self.config.get("enabled", False):
             return
 
-        # Filter by only_when threshold
+        # Filter by only_when threshold AND respect snooze/ignore state
+        # (so a user who hits "Snooze" on Telegram also stops getting emails)
         threshold_str = self.config.get("only_when", "warn")
         threshold = Severity.from_str(threshold_str)
-        worst = max((r.severity for r in results), default=Severity.OK)
-        if worst < threshold:
-            return  # nothing to report
+        state = State.load()
+        actionable = [
+            r for r in results
+            if r.severity >= threshold and not state.is_silenced(r.check_name)
+        ]
+        if not actionable:
+            return  # nothing to report (or everything silenced)
+        # The body builder still uses the full results list for the OK count.
+        worst = max(r.severity for r in actionable)
 
         to_addr = self.config.get("to")
         from_addr = self.config.get("from") or f"watchlog@{socket.getfqdn()}"
