@@ -374,7 +374,7 @@
         token = '';
         return;
       }
-      // 503 (no heartbeat yet) is fine — token works, just no data
+      // 503 (no heartbeat yet) is fine – token works, just no data
       if (!res.ok && res.status !== 503) {
         $('login-err').textContent = `HTTP ${res.status}`;
         token = '';
@@ -444,7 +444,7 @@
       `${(ageMin / 60).toFixed(1)} h ago`;
 
     if (s.worst_severity === 'OK' || s.worst_severity === 'INFO') {
-      $('banner-title').textContent = `All clear — ${s.checks_total} checks`;
+      $('banner-title').textContent = `All clear – ${s.checks_total} checks`;
       $('banner-meta').textContent = `Last run ${ageStr} on ${s.host} · v${s.watchlog_version}`;
     } else {
       const cnt = s.actionable.length;
@@ -481,7 +481,7 @@
     });
 
     if (allChecks.length === 0) {
-      list.innerHTML = '<div class="check-row" style="padding: 1.5rem; color: var(--fg-muted);">All checks passing — nothing to act on.</div>';
+      list.innerHTML = '<div class="check-row" style="padding: 1.5rem; color: var(--fg-muted);">All checks passing – nothing to act on.</div>';
       return;
     }
 

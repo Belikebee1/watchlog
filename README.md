@@ -1,20 +1,49 @@
 # watchlog
 
-Server health and security monitor for Linux servers. Python tool that runs scheduled checks (apt updates, SSL certs, services, disk, mail blacklists, SSH brute-force, etc.) and sends notifications via email — or, paired with `unattended-upgrades`, gives you fully-automated security patching with no SSH session needed.
+**Your server, watched while you sleep.**
 
-Built for self-hosted setups where you want to know **what needs attention without logging in to check**.
+watchlog is a small Python tool that runs on your Linux server and quietly checks the
+12 things that commonly break – SSL certificates, security updates, disk space, mail
+deliverability, brute-force attacks, blacklists, and more. When something needs your
+attention, you get an email and a Telegram message with a one-tap action button.
+The rest of the time, it stays silent.
 
-🌐 **Landing page:** [watchlog.pl](https://watchlog.pl) (also in Polish at [watchlog.pl/pl/](https://watchlog.pl/pl/))
+🌐 **Landing page:** [watchlog.pl](https://watchlog.pl) · also in [Polish](https://watchlog.pl/pl/)
 
-## Features
+## Why does this exist?
 
-- 🔒 **Security-focused** — APT security updates flagged as critical, IP blacklist monitoring, SSH brute-force detection
-- 🤫 **No spam** — email only when something is actually wrong, configurable severity threshold
-- 🔌 **Pluggable** — checks and reporters are independent modules, easy to add new ones
-- 📧 **Multi-channel notifications** — email (SMTP), Telegram bot (with action buttons, v0.2), stdout, JSON
-- ⏰ **systemd-native** — installs as systemd timer (default: every 4 hours)
-- 📋 **Audit trail** — every run archived as JSON in `/var/log/watchlog/`
-- 💓 **Heartbeat** — optional public `/status.json` for external dead-man's-switch monitoring
+You run a server. It hosts a website, email, maybe a database. Plenty of small things
+can quietly break, and you only find out when something already stopped working:
+
+- Your **SSL certificate expires** and the green padlock turns red.
+- A **critical security update** is published but nobody installs it.
+- The **disk fills up** and your database can't write any more.
+- A **service crashes** silently in the night.
+- Someone is **hammering your SSH** with thousands of password guesses.
+- Your **IP lands on a spam blacklist** and emails stop being delivered.
+
+The classic answer is "log into the server every day and check". Nobody actually does
+that. Small problems pile up until something breaks.
+
+watchlog runs on your server, checks 12 things every 4 hours, and only contacts you
+when something needs attention. You get an email and a Telegram message with a one-tap
+button. Tap "Apply security updates" on your phone and the patch installs itself.
+No SSH session, no logging in to check, no daily digest spam.
+
+It's free, open source (MIT), and you keep all your data – nothing leaves your server.
+
+## What you get
+
+- 🔒 **Security-focused** – APT security updates flagged as critical, IP blacklist monitoring, SSH brute-force detection, file-integrity (AIDE), open-ports baseline diff
+- 🤫 **No spam** – email and Telegram only when something is actually wrong, configurable severity threshold
+- 📱 **Action buttons on your phone** – Telegram bot with Apply / Snooze / Ignore, no SSH needed
+- 🖥️ **Web dashboard** – glanceable view at any time, login once with a token
+- 🔧 **REST API + OpenAPI docs** – integrate with anything (mobile apps, dashboards, scripts)
+- ⏰ **systemd-native** – installs as a timer, runs every 4 hours by default
+- 🔁 **Pairs with `unattended-upgrades`** – fully automated patching: detect (watchlog) + install (apt)
+- 💓 **Heartbeat** – optional public `/status.json` so external monitors know watchlog itself is alive
+- 📋 **Audit trail** – every run archived as JSON in `/var/log/watchlog/`
+- 🧩 **Pluggable** – one file per check, one file per reporter; easy to add your own
 
 ## Quick start
 
@@ -49,7 +78,7 @@ systemctl list-timers apt-daily-upgrade watchlog
 
 watchlog only **detects** and **notifies**. To actually **apply** security patches automatically, pair it with `unattended-upgrades` (Ubuntu's built-in tool, often disabled by default). Together they give you end-to-end automated security with no SSH session needed.
 
-### Typical security update — start to finish
+### Typical security update – start to finish
 
 ```
 🔘  14:00 UTC  Ubuntu releases security update
@@ -106,7 +135,7 @@ watchlog only **detects** and **notifies**. To actually **apply** security patch
 | `email` | SMTP | scheduled runs |
 | `telegram` | Telegram bot | interactive notifications with action buttons (Apply / Snooze / Ignore) |
 | `json` | JSON file (per-day archive in `/var/log/watchlog/`) | audit / machine consumption |
-| `status_file` | small JSON heartbeat | dead-man's-switch — serve as public URL, monitor externally |
+| `status_file` | small JSON heartbeat | dead-man's-switch – serve as public URL, monitor externally |
 
 ### Heartbeat / dead-man's-switch
 
@@ -125,7 +154,7 @@ The `status_file` reporter writes a small `status.json` after every run. Mount t
 }
 ```
 
-If `ran_at` becomes stale (older than your timer interval + grace), the timer has stopped firing — investigate immediately.
+If `ran_at` becomes stale (older than your timer interval + grace), the timer has stopped firing – investigate immediately.
 
 ## Configuration
 
@@ -168,7 +197,7 @@ watchlog/
 
 ## Telegram bot (v0.2)
 
-watchlog can push alerts to a Telegram chat with **inline action buttons**. Click a button on your phone, the bot runs the action on the server, and replies with the result. No webhook, no public HTTPS endpoint — uses long-polling.
+watchlog can push alerts to a Telegram chat with **inline action buttons**. Click a button on your phone, the bot runs the action on the server, and replies with the result. No webhook, no public HTTPS endpoint – uses long-polling.
 
 ### Setup (5 minutes)
 
@@ -176,7 +205,7 @@ watchlog can push alerts to a Telegram chat with **inline action buttons**. Clic
 # Walks you through BotFather + @userinfobot to get token & chat_id
 sudo watchlog telegram setup
 
-# Edit /etc/watchlog/config.yaml — set notifications.telegram.enabled: true
+# Edit /etc/watchlog/config.yaml – set notifications.telegram.enabled: true
 #   and paste the bot_token and chat_id from setup wizard
 
 # Install + start bot daemon (always-on, listens for button clicks)
@@ -203,7 +232,7 @@ journalctl -u watchlog-bot -f       # tail logs
 | `/runnow` | Run watchlog and post the report |
 | `/clearignores` | Un-ignore all checks |
 
-The daemon only accepts callbacks from the configured `chat_id` — any other chat is silently rejected and logged.
+The daemon only accepts callbacks from the configured `chat_id` – any other chat is silently rejected and logged.
 
 ## REST API + Web dashboard (v0.3)
 
@@ -259,12 +288,12 @@ Vanilla HTML/JS, no framework. Login screen accepts the token, stores it in `loc
 
 ## Roadmap
 
-- ✅ **v0.1** — 9 checks, stdout/email/JSON/status_file reporters, systemd installer
-- ✅ **v0.2** — Telegram bot reporter with interactive buttons (Apply / Snooze / Ignore)
-- ✅ **v0.3** — REST API + web dashboard with Bearer auth, action endpoints
-- ✅ **v0.4** — fail2ban stats, open-ports baseline diff, file integrity (AIDE)
-- 📱 **v0.5** — Native mobile app (iOS/Android with FCM push) — uses v0.3 API as backend
+- ✅ **v0.1** – 9 checks, stdout/email/JSON/status_file reporters, systemd installer
+- ✅ **v0.2** – Telegram bot reporter with interactive buttons (Apply / Snooze / Ignore)
+- ✅ **v0.3** – REST API + web dashboard with Bearer auth, action endpoints
+- ✅ **v0.4** – fail2ban stats, open-ports baseline diff, file integrity (AIDE)
+- 📱 **v0.5** – Native mobile app (iOS/Android with FCM push) – uses v0.3 API as backend
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT – see [LICENSE](LICENSE).
