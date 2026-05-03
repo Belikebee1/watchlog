@@ -107,6 +107,34 @@ checks:
     threshold_24h: 1000  # alert if more failed logins than this
     log_path: /var/log/auth.log
 
+  # ----- v0.4 checks -----
+
+  fail2ban_stats:
+    enabled: true
+    # WARN if currently_banned across all jails exceeds this
+    warn_currently_banned: 50
+    critical_currently_banned: 200
+    # Optional: list of jail names that MUST be active (else WARN)
+    required_jails:
+      - sshd
+
+  open_ports:
+    enabled: true
+    # First run captures the baseline. Diff is reported afterward.
+    baseline: /var/lib/watchlog/ports-baseline.txt
+    # Severity when a NEW port appears since baseline (possible intrusion)
+    new_port_severity: warn      # ok / info / warn / critical
+    # Severity when a baselined port has CLOSED (service stopped)
+    closed_port_severity: info
+
+  file_integrity:
+    # AIDE-based. Requires `apt install aide` + `aideinit`.
+    # If AIDE not installed, this check returns INFO (no error).
+    enabled: true
+    timeout_s: 600              # AIDE on a populated DB can take minutes
+    change_severity: critical    # changed/removed file = tampering signal
+    add_severity: warn           # new file added — usually package install
+
 # State storage — where reports get archived
 state:
   log_dir: /var/log/watchlog

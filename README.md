@@ -94,6 +94,9 @@ watchlog only **detects** and **notifies**. To actually **apply** security patch
 | `ip_blacklist` | Spamhaus, Barracuda, SpamCop, SORBS | CRITICAL if listed |
 | `dns_records` | SPF/DKIM/DMARC/MX/A presence regression | CRITICAL if missing |
 | `ssh_brute` | failed SSH logins in last 24h | WARN >threshold |
+| `fail2ban_stats` | jail count, currently banned, required jails active | CRITICAL if service down · WARN on missing jails |
+| `open_ports` | new listening ports vs baseline (intrusion signal) | WARN if new ports detected |
+| `file_integrity` | AIDE filesystem checksums vs baseline | CRITICAL on changed/removed file |
 
 ## Reporters
 
@@ -259,7 +262,7 @@ Vanilla HTML/JS, no framework. Login screen accepts the token, stores it in `loc
 - ✅ **v0.1** — 9 checks, stdout/email/JSON/status_file reporters, systemd installer
 - ✅ **v0.2** — Telegram bot reporter with interactive buttons (Apply / Snooze / Ignore)
 - ✅ **v0.3** — REST API + web dashboard with Bearer auth, action endpoints
-- 🛡️ **v0.4** — fail2ban stats, open-ports baseline diff, file integrity (AIDE), CVE matching
+- ✅ **v0.4** — fail2ban stats, open-ports baseline diff, file integrity (AIDE)
 - 📱 **v0.5** — Native mobile app (iOS/Android with FCM push) — uses v0.3 API as backend
 
 ## License
