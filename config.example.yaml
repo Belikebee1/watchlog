@@ -1,19 +1,48 @@
 # watchlog configuration
 # Copy to /etc/watchlog/config.yaml and edit.
 
-# Notifications – where reports get sent
+# =====================================================================
+# Notifications – where alerts go when something needs attention
+# =====================================================================
+# watchlog supports multiple channels at once. Pick what works for your setup:
+#
+#   ✅ TELEGRAM (recommended for most users)
+#      Works on ANY server with internet. No mail server needed.
+#      Setup: `watchlog telegram setup` (5 min, walks you through BotFather)
+#
+#   📧 EMAIL via LOCAL mail server
+#      If you already have Postfix/Exim running on this server.
+#      Default smtp_host: 127.0.0.1, port 25.
+#      Setup: just enable below.
+#
+#   📧 EMAIL via EXTERNAL SMTP relay (Gmail, Mailgun, SendGrid, AWS SES…)
+#      No local mail server needed; uses an external service.
+#      Setup: enable below + fill smtp_host/port/user/password.
+#
+#   For comparison and tradeoffs see:
+#   https://github.com/Belikebee1/watchlog#choosing-notification-channels
+# =====================================================================
+
 notifications:
-  # Email reporter
+  # ----- EMAIL reporter -----
+  # DISABLED by default. If your server has no mail client set up and no
+  # external SMTP credentials, leave this off and use Telegram below.
   email:
-    enabled: true
+    enabled: false
     to: you@example.com
     from: watchlog@example.com
+    # For LOCAL Postfix/Exim on this server (most common):
     smtp_host: 127.0.0.1
     smtp_port: 25
-    smtp_user: ""        # empty = no auth (local Postfix)
+    smtp_user: ""        # empty = no auth (local mail server)
     smtp_password: ""
     smtp_starttls: false
-    # Send mail only when worst result is at this severity or higher
+    # For EXTERNAL relay (Gmail example):
+    #   smtp_host: smtp.gmail.com
+    #   smtp_port: 587
+    #   smtp_user: your-account@gmail.com
+    #   smtp_password: "google-app-password"   # NOT your regular password
+    #   smtp_starttls: true
     only_when: warn      # ok / info / warn / critical
 
   # Telegram reporter – interactive notifications with action buttons.

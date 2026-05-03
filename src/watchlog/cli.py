@@ -172,6 +172,116 @@ def install(schedule: str) -> None:
     click.echo("   Run now: systemctl start watchlog.service")
 
 
+@main.group(help="Email reporter management.")
+def email() -> None:
+    pass
+
+
+@email.command(name="setup", help="Interactive walkthrough: choose local / external SMTP / disabled.")
+@click.pass_context
+def email_setup(ctx: click.Context) -> None:
+    """Walk the user through configuring the email reporter."""
+    cfg = load_config(ctx.obj.get("config_path"))
+    if not cfg.path:
+        click.echo("Cannot determine config path.", err=True)
+        sys.exit(1)
+
+    click.echo("=" * 60)
+    click.echo("watchlog email setup")
+    click.echo("=" * 60)
+    click.echo()
+    click.echo("Pick how watchlog should send email alerts:")
+    click.echo()
+    click.echo("  [1] Disable email entirely (use Telegram only)")
+    click.echo("  [2] Local mail server (Postfix/Exim already on this box)")
+    click.echo("  [3] External SMTP relay (Gmail, Mailgun, SES, ...)")
+    click.echo()
+    choice = click.prompt("Choice", type=click.Choice(["1", "2", "3"]), default="1")
+    click.echo()
+
+    if choice == "1":
+        click.echo("Disabling email reporter.")
+        click.echo()
+        click.echo("Edit /etc/watchlog/config.yaml and set:")
+        click.echo("    notifications.email.enabled: false")
+        click.echo()
+        click.echo("Then for alerts, set up Telegram instead:")
+        click.echo("    sudo watchlog telegram setup")
+        return
+
+    to_addr = click.prompt("Notify email address (where alerts arrive)", type=str).strip()
+    from_addr = click.prompt(
+        "Sender address (From: header)", type=str, default=f"watchlog@{to_addr.split('@', 1)[1]}"
+    ).strip()
+
+    if choice == "2":
+        click.echo()
+        click.echo("Using local mail server on 127.0.0.1:25.")
+        click.echo("Make sure Postfix/Exim is running and accepts mail from localhost.")
+        smtp_host = "127.0.0.1"
+        smtp_port = 25
+        smtp_user = ""
+        smtp_password = ""
+        smtp_starttls = False
+
+    else:  # choice 3
+        click.echo()
+        click.echo("Common external SMTP relays:")
+        click.echo("  Gmail:    smtp.gmail.com:587 (use Google App Password, not your real password)")
+        click.echo("  Mailgun:  smtp.mailgun.org:587")
+        click.echo("  SendGrid: smtp.sendgrid.net:587")
+        click.echo("  AWS SES:  email-smtp.<region>.amazonaws.com:587")
+        click.echo()
+        smtp_host = click.prompt("SMTP host", type=str, default="smtp.gmail.com").strip()
+        smtp_port = int(click.prompt("SMTP port", type=int, default=587))
+        smtp_user = click.prompt("SMTP username", type=str).strip()
+        smtp_password = click.prompt("SMTP password / app password", hide_input=True, type=str)
+        smtp_starttls = click.confirm("Use STARTTLS?", default=True)
+
+    click.echo()
+    click.echo("Sending a test email...")
+    import smtplib  # noqa: PLC0415
+    from email.message import EmailMessage  # noqa: PLC0415
+    msg = EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = "watchlog test email"
+    msg.set_content(
+        "This is a test email from `watchlog email setup`.\n"
+        "If you received this, your SMTP config is working.\n"
+    )
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=15) as smtp:
+            if smtp_starttls:
+                smtp.starttls()
+            if smtp_user and smtp_password:
+                smtp.login(smtp_user, smtp_password)
+            smtp.send_message(msg)
+        click.secho(f"✅ Test email sent to {to_addr}.", fg="green")
+    except Exception as exc:  # noqa: BLE001
+        click.secho(f"❌ SMTP test failed: {exc}", fg="red")
+        if not click.confirm("Continue and write the config anyway?", default=False):
+            click.echo("Aborted.")
+            sys.exit(1)
+
+    click.echo()
+    click.echo("Add this to /etc/watchlog/config.yaml under `notifications:`")
+    click.echo()
+    click.secho(f"  email:", fg="cyan")
+    click.secho(f"    enabled: true", fg="cyan")
+    click.secho(f"    to: \"{to_addr}\"", fg="cyan")
+    click.secho(f"    from: \"{from_addr}\"", fg="cyan")
+    click.secho(f"    smtp_host: \"{smtp_host}\"", fg="cyan")
+    click.secho(f"    smtp_port: {smtp_port}", fg="cyan")
+    if smtp_user:
+        click.secho(f"    smtp_user: \"{smtp_user}\"", fg="cyan")
+        click.secho(f"    smtp_password: \"<see your password manager>\"", fg="cyan")
+    click.secho(f"    smtp_starttls: {str(smtp_starttls).lower()}", fg="cyan")
+    click.secho(f"    only_when: warn", fg="cyan")
+    click.echo()
+    click.echo("(I'm not auto-writing the config to avoid clobbering your other settings.)")
+
+
 @main.group(help="Telegram bot management.")
 def telegram() -> None:
     pass

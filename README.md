@@ -45,26 +45,62 @@ It's free, open source (MIT), and you keep all your data – nothing leaves your
 - 📋 **Audit trail** – every run archived as JSON in `/var/log/watchlog/`
 - 🧩 **Pluggable** – one file per check, one file per reporter; easy to add your own
 
+## Choosing notification channels
+
+watchlog needs **somewhere** to send alerts. You don't need a mail server – pick whichever fits your setup:
+
+| Path | Best for | Needs | Setup time |
+|---|---|---|---|
+| ✅ **Telegram only** | Fresh server with no mail infrastructure. **Recommended default.** | Internet outbound + a Telegram account | 5 min |
+| 📧 **Local mail server** | Servers that already have Postfix/Exim running | Local Postfix/Exim on `127.0.0.1:25` | 0 min if already installed |
+| 📧 **External SMTP relay** | Servers where you want email but don't run a local MTA | Account at Gmail / Mailgun / SendGrid / AWS SES | 10 min (account + app password) |
+| 🔇 **None at all** | If you only want the public `/status.json` heartbeat for an external monitor | Nothing | 0 min |
+
+You can combine them – e.g. Telegram for instant phone alerts plus email for archival. Both run side by side.
+
+**TL;DR for a new server with no mail server:** use Telegram. Run `watchlog telegram setup`, paste the bot token from BotFather and your chat_id from `@userinfobot`. Done.
+
 ## Quick start
 
 ```bash
 # 1. Install (latest from main)
 pip install git+https://github.com/Belikebee1/watchlog.git
 
-# 2. Configure
+# 2. Configure base settings (which checks, severity thresholds, etc.)
 sudo mkdir -p /etc/watchlog
 sudo curl -o /etc/watchlog/config.yaml \
   https://raw.githubusercontent.com/Belikebee1/watchlog/main/config.example.yaml
 sudo $EDITOR /etc/watchlog/config.yaml
 
-# 3. Run once to verify
+# 3. Set up notifications – pick ONE (or both) of these:
+
+# 3a. Telegram (recommended – works on any server, no mail needed)
+sudo watchlog telegram setup
+# Then enable in /etc/watchlog/config.yaml: notifications.telegram.enabled: true
+sudo watchlog telegram install-service
+sudo systemctl start watchlog-bot
+
+# 3b. Email via LOCAL mail server (if you have Postfix/Exim)
+# Edit /etc/watchlog/config.yaml: notifications.email.enabled: true
+# Default settings (smtp_host: 127.0.0.1, port 25) work for local Postfix.
+
+# 3c. Email via EXTERNAL SMTP (Gmail, Mailgun, SES…)
+# Edit /etc/watchlog/config.yaml notifications.email:
+#   enabled: true
+#   smtp_host: smtp.gmail.com
+#   smtp_port: 587
+#   smtp_user: your-account@gmail.com
+#   smtp_password: "google-app-password"   # NOT your regular password
+#   smtp_starttls: true
+
+# 4. Run once to verify
 sudo watchlog run
 
-# 4. Enable systemd timer (every 4 hours by default)
+# 5. Enable systemd timer (every 4 hours by default)
 sudo watchlog install
 systemctl list-timers watchlog
 
-# 5. Pair with unattended-upgrades for auto-patching (recommended)
+# 6. Pair with unattended-upgrades for auto-patching (recommended)
 echo 'APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";' | sudo tee /etc/apt/apt.conf.d/20auto-upgrades
 
