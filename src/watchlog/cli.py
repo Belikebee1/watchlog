@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -169,6 +170,134 @@ def install(schedule: str) -> None:
     click.echo(f"✅ Installed. Will run daily at {schedule}.")
     click.echo("   Status: systemctl status watchlog.timer")
     click.echo("   Run now: systemctl start watchlog.service")
+
+
+@main.group(help="Telegram bot management.")
+def telegram() -> None:
+    pass
+
+
+@telegram.command(name="setup", help="Interactive walkthrough to configure Telegram bot.")
+@click.pass_context
+def telegram_setup(ctx: click.Context) -> None:
+    """Walk the user through getting a bot token and chat_id."""
+    click.echo("=" * 60)
+    click.echo("watchlog Telegram bot setup")
+    click.echo("=" * 60)
+    click.echo()
+    click.echo("Step 1: Create a bot")
+    click.echo("  Open Telegram → search '@BotFather' → send /newbot")
+    click.echo("  Pick a name (e.g. 'My server watchlog') and a username")
+    click.echo("  ending in 'bot' (e.g. 'myserver_watchlog_bot').")
+    click.echo("  BotFather will reply with a token like:")
+    click.echo("    123456789:ABCdef-GhIJkl...")
+    click.echo()
+    token = click.prompt("Paste the bot token", type=str).strip()
+
+    click.echo()
+    click.echo("Step 2: Find your chat_id")
+    click.echo("  Open Telegram → search '@userinfobot' → send /start")
+    click.echo("  It will reply with your numeric ID.")
+    click.echo()
+    chat_id = click.prompt("Paste your chat_id (number)", type=str).strip()
+
+    click.echo()
+    click.echo("Step 3: Test it")
+    click.echo("  I'll send a test message to confirm the bot can reach you.")
+    if click.confirm("Continue?", default=True):
+        from urllib import error as urlerror  # noqa: PLC0415
+        from urllib import request as urlreq  # noqa: PLC0415
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        body = json.dumps({
+            "chat_id": chat_id,
+            "text": "👁️ watchlog test — if you see this, your bot is working!",
+        }).encode("utf-8")
+        req = urlreq.Request(
+            url, data=body, headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urlreq.urlopen(req, timeout=15) as resp:
+                resp.read()
+            click.secho("✅ Test message sent. Check Telegram.", fg="green")
+        except urlerror.HTTPError as exc:
+            click.secho(f"❌ HTTP {exc.code}: {exc.read().decode()[:300]}", fg="red")
+            ctx.exit(1)
+        except urlerror.URLError as exc:
+            click.secho(f"❌ Network error: {exc}", fg="red")
+            ctx.exit(1)
+
+    click.echo()
+    click.echo("Step 4: Save to config")
+    click.echo(f"  Add to your /etc/watchlog/config.yaml under notifications.telegram:")
+    click.echo(f"")
+    click.echo(f"  notifications:")
+    click.echo(f"    telegram:")
+    click.echo(f"      enabled: true")
+    click.echo(f"      bot_token: \"{token}\"")
+    click.echo(f"      chat_id: \"{chat_id}\"")
+    click.echo(f"      only_when: warn")
+    click.echo()
+    click.echo("Step 5: Start the bot daemon")
+    click.echo("  sudo watchlog telegram install-service")
+    click.echo("  sudo systemctl start watchlog-bot")
+    click.echo()
+    click.secho("Done.", fg="green")
+
+
+@telegram.command(name="bot", help="Run the Telegram bot daemon (long-polling).")
+@click.pass_context
+def telegram_bot(ctx: click.Context) -> None:
+    cfg = load_config(ctx.obj.get("config_path"))
+    from watchlog.bot import main as bot_main  # noqa: PLC0415
+
+    sys.exit(bot_main(cfg))
+
+
+@telegram.command(
+    name="install-service",
+    help="Install systemd service for the bot daemon (auto-start, restart on crash).",
+)
+def telegram_install_service() -> None:
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
+
+    if shutil.which("systemctl") is None:
+        click.echo("systemctl not found.", err=True)
+        sys.exit(1)
+
+    bin_path = shutil.which("watchlog") or "/usr/local/bin/watchlog"
+
+    service = textwrap.dedent(
+        f"""\
+        [Unit]
+        Description=watchlog Telegram bot daemon
+        After=network-online.target
+        Wants=network-online.target
+
+        [Service]
+        Type=simple
+        ExecStart={bin_path} telegram bot
+        Restart=on-failure
+        RestartSec=10s
+        # Run as root so the bot can `unattended-upgrade` and `watchlog run`.
+        # If you want to drop privileges, set User= and ensure that user can sudo
+        # the specific commands without password (more complex setup).
+        User=root
+
+        [Install]
+        WantedBy=multi-user.target
+        """
+    )
+
+    Path("/etc/systemd/system/watchlog-bot.service").write_text(service)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "watchlog-bot.service"], check=True)
+    click.echo("✅ Installed watchlog-bot.service.")
+    click.echo("   Start: sudo systemctl start watchlog-bot")
+    click.echo("   Status: systemctl status watchlog-bot")
+    click.echo("   Logs: journalctl -u watchlog-bot -f")
 
 
 if __name__ == "__main__":

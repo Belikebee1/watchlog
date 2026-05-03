@@ -101,7 +101,7 @@ watchlog only **detects** and **notifies**. To actually **apply** security patch
 |---|---|---|
 | `stdout` | terminal (rich/colored) | manual runs, CI |
 | `email` | SMTP | scheduled runs |
-| `telegram` | Telegram bot | interactive notifications with buttons (v0.2) |
+| `telegram` | Telegram bot | interactive notifications with action buttons (Apply / Snooze / Ignore) |
 | `json` | JSON file (per-day archive in `/var/log/watchlog/`) | audit / machine consumption |
 | `status_file` | small JSON heartbeat | dead-man's-switch — serve as public URL, monitor externally |
 
@@ -163,10 +163,49 @@ watchlog/
 └── ops/systemd/       # systemd unit + timer templates
 ```
 
+## Telegram bot (v0.2)
+
+watchlog can push alerts to a Telegram chat with **inline action buttons**. Click a button on your phone, the bot runs the action on the server, and replies with the result. No webhook, no public HTTPS endpoint — uses long-polling.
+
+### Setup (5 minutes)
+
+```bash
+# Walks you through BotFather + @userinfobot to get token & chat_id
+sudo watchlog telegram setup
+
+# Edit /etc/watchlog/config.yaml — set notifications.telegram.enabled: true
+#   and paste the bot_token and chat_id from setup wizard
+
+# Install + start bot daemon (always-on, listens for button clicks)
+sudo watchlog telegram install-service
+sudo systemctl start watchlog-bot
+journalctl -u watchlog-bot -f       # tail logs
+```
+
+### What the buttons do
+
+| Button | Action |
+|---|---|
+| ✅ **Apply security updates** | Runs `unattended-upgrade -v` and posts the output |
+| 🔄 **Run watchlog now** | Triggers a fresh `watchlog run` and posts the result |
+| ⏰ **Snooze `<check>` 4h** | Silences alerts for that one check for 4 hours |
+| 🚫 **Ignore `<check>`** | Silences until manually un-ignored via `/clearignores` |
+
+### Bot commands (text messages)
+
+| Command | What it does |
+|---|---|
+| `/help` or `/start` | Show command list |
+| `/status` | List currently snoozed/ignored checks |
+| `/runnow` | Run watchlog and post the report |
+| `/clearignores` | Un-ignore all checks |
+
+The daemon only accepts callbacks from the configured `chat_id` — any other chat is silently rejected and logged.
+
 ## Roadmap
 
 - ✅ **v0.1** — 9 checks, stdout/email/JSON/status_file reporters, systemd installer
-- 🤖 **v0.2** — Telegram bot reporter with interactive buttons (Apply / Postpone / Ignore)
+- ✅ **v0.2** — Telegram bot reporter with interactive buttons (Apply / Snooze / Ignore)
 - 📱 **v0.3** — REST API daemon, web dashboard, action endpoints for mobile clients
 - 🛡️ **v0.4** — fail2ban stats, open-ports baseline diff, file integrity (AIDE), CVE matching
 

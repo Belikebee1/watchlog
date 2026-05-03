@@ -16,12 +16,16 @@ notifications:
     # Send mail only when worst result is at this severity or higher
     only_when: warn      # ok / info / warn / critical
 
-  # Telegram reporter (v0.2 — coming soon)
+  # Telegram reporter — interactive notifications with action buttons.
+  # Run `watchlog telegram setup` for a guided walkthrough to obtain bot_token + chat_id.
+  # The reporter only SENDS messages; for buttons to work you also need the daemon:
+  #   sudo watchlog telegram install-service
+  #   sudo systemctl start watchlog-bot
   telegram:
     enabled: false
-    bot_token: ""        # from @BotFather
-    chat_id: ""          # from @userinfobot
-    only_when: warn
+    bot_token: ""        # from @BotFather (e.g. "123456789:ABCdef-...")
+    chat_id: ""          # from @userinfobot (numeric)
+    only_when: warn      # ok / info / warn / critical
 
   # Status file — writes a small JSON heartbeat after every run.
   # Useful as a public dead-man's-switch: external monitors fetch this URL
