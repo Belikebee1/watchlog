@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "watchlog"
-version = "0.4.1"
+version = "0.5.0"
 description = "Server health and security monitor with multi-channel notifications"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,6 +34,7 @@ dependencies = [
 [project.optional-dependencies]
 telegram = ["python-telegram-bot>=21.0"]
 api = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.5"]
+fcm = ["firebase-admin>=6.5"]
 dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
 
 [project.scripts]

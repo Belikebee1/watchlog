@@ -56,6 +56,18 @@ notifications:
     chat_id: ""          # from @userinfobot (numeric)
     only_when: warn      # ok / info / warn / critical
 
+  # ----- FCM PUSH (mobile app) -----
+  # Sends a push notification to all devices registered with the backend.
+  # Requires:
+  #   1. Mobile app (watchlog_mobile) registered with Firebase project
+  #   2. Service Account JSON downloaded from Firebase Console
+  #      → Project Settings → Service Accounts → Generate private key
+  #   3. pip install 'watchlog[fcm]' (installs firebase-admin)
+  fcm_push:
+    enabled: false
+    service_account_path: /etc/watchlog/firebase-service-account.json
+    only_when: warn
+
   # Status file – writes a small JSON heartbeat after every run.
   # Useful as a public dead-man's-switch: external monitors fetch this URL
   # and alert if "ran_at" gets stale (= timer stopped firing).

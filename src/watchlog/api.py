@@ -42,6 +42,7 @@ except ImportError as exc:  # pragma: no cover
 
 from watchlog import __version__
 from watchlog.core.config import Config
+from watchlog.fcm import TokenRegistry
 from watchlog.state import State
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,14 @@ class SnoozeRequest(BaseModel):
 
 class IgnoreRequest(BaseModel):
     check: str = Field(..., description="Check name to ignore until manual clear")
+
+
+class PushRegisterRequest(BaseModel):
+    token: str = Field(..., description="FCM device token from Firebase")
+    platform: str = Field("unknown", description="android | ios | unknown")
+    device_label: str | None = Field(
+        None, description="Optional human label, e.g. 'Andrzej iPhone'"
+    )
 
 
 class ActionResult(BaseModel):
@@ -257,6 +266,52 @@ def create_app(config: Config) -> FastAPI:
     )
     def apply_security() -> ActionResult:
         return _run_command(["unattended-upgrade", "-v"])
+
+    # --------------- protected — push notification registration ---------------
+
+    @app.post(
+        "/api/v1/push/register",
+        tags=["push"],
+        dependencies=[Depends(require_token)],
+    )
+    def push_register(body: PushRegisterRequest) -> dict[str, Any]:
+        registry = TokenRegistry()
+        new = registry.register(body.token, body.platform, body.device_label)
+        return {
+            "ok": True,
+            "newly_registered": new,
+            "total_devices": len(registry.all_tokens()),
+        }
+
+    @app.delete(
+        "/api/v1/push/register/{token}",
+        tags=["push"],
+        dependencies=[Depends(require_token)],
+    )
+    def push_unregister(token: str) -> dict[str, Any]:
+        registry = TokenRegistry()
+        removed = registry.unregister(token)
+        return {"ok": True, "removed": removed}
+
+    @app.get(
+        "/api/v1/push/devices",
+        tags=["push"],
+        dependencies=[Depends(require_token)],
+    )
+    def push_list() -> dict[str, Any]:
+        registry = TokenRegistry()
+        # Don't leak full tokens — show first 16 chars only
+        return {
+            "devices": [
+                {
+                    "token_prefix": e["token"][:16] + "...",
+                    "platform": e.get("platform"),
+                    "device_label": e.get("device_label"),
+                    "registered_at": e.get("registered_at"),
+                }
+                for e in registry.all_entries()
+            ],
+        }
 
     return app
 

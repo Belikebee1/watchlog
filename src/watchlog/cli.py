@@ -282,6 +282,67 @@ def email_setup(ctx: click.Context) -> None:
     click.echo("(I'm not auto-writing the config to avoid clobbering your other settings.)")
 
 
+@main.group(help="FCM push notification management (mobile app).")
+def push() -> None:
+    pass
+
+
+@push.command(name="list", help="List devices registered for push notifications.")
+def push_list() -> None:
+    from watchlog.fcm import TokenRegistry  # noqa: PLC0415
+
+    entries = TokenRegistry().all_entries()
+    if not entries:
+        click.echo("No devices registered.")
+        return
+    click.echo(f"{len(entries)} device(s) registered:")
+    for e in entries:
+        token_short = e["token"][:16] + "..."
+        platform = e.get("platform", "?")
+        label = e.get("device_label") or "(no label)"
+        registered = e.get("registered_at", "?")
+        click.echo(f"  [{platform}] {token_short}  {label}  ({registered})")
+
+
+@push.command(name="test", help="Send a test push notification to all registered devices.")
+@click.option("--title", default="watchlog test", help="Notification title")
+@click.option(
+    "--body",
+    default="If you see this, push notifications are working!",
+    help="Notification body",
+)
+@click.pass_context
+def push_test(ctx: click.Context, title: str, body: str) -> None:
+    from watchlog.fcm import FcmSender, TokenRegistry  # noqa: PLC0415
+
+    cfg = load_config(ctx.obj.get("config_path"))
+    fcm_cfg = cfg.reporter_config("fcm_push")
+    sa_path = fcm_cfg.get("service_account_path")
+    if not sa_path:
+        click.echo(
+            "notifications.fcm_push.service_account_path not set in config.",
+            err=True,
+        )
+        ctx.exit(1)
+
+    registry = TokenRegistry()
+    tokens = registry.all_tokens()
+    if not tokens:
+        click.echo("No devices registered. Open the mobile app and sign in first.")
+        return
+
+    click.echo(f"Sending to {len(tokens)} device(s)...")
+    sender = FcmSender(sa_path)
+    successes, invalid = sender.send_to_tokens(tokens, title=title, body=body)
+    click.secho(f"✅ Sent: {successes}/{len(tokens)}", fg="green")
+    if invalid:
+        click.secho(
+            f"⚠️ {len(invalid)} invalid token(s) — removing from registry",
+            fg="yellow",
+        )
+        registry.remove_invalid(invalid)
+
+
 @main.group(help="Telegram bot management.")
 def telegram() -> None:
     pass
