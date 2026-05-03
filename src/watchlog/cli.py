@@ -300,5 +300,105 @@ def telegram_install_service() -> None:
     click.echo("   Logs: journalctl -u watchlog-bot -f")
 
 
+@main.group(help="REST API + dashboard daemon (v0.3+).")
+def api() -> None:
+    pass
+
+
+@api.command(name="setup", help="Generate API token and write to /etc/watchlog/config.yaml.")
+@click.pass_context
+def api_setup(ctx: click.Context) -> None:
+    import secrets  # noqa: PLC0415
+    cfg = load_config(ctx.obj.get("config_path"))
+    if not cfg.path:
+        click.echo("Cannot determine config path.", err=True)
+        sys.exit(1)
+    existing = (cfg.get("api", default={}) or {}).get("token")
+    if existing:
+        if not click.confirm(f"API token already set. Regenerate? Current: {existing[:8]}…", default=False):
+            click.echo("Keeping existing token.")
+            click.echo(f"Token: {existing}")
+            return
+    new_token = secrets.token_urlsafe(32)
+    # Append api: section if not present, or update if present.
+    text = cfg.path.read_text()
+    if "\napi:" in text or text.startswith("api:"):
+        # Replace existing token line under api:
+        import re  # noqa: PLC0415
+        text = re.sub(
+            r"(\napi:\s*\n(?:[^\n]*\n)*?\s*token:\s*)\"[^\"]*\"",
+            r"\1\"" + new_token + "\"",
+            text,
+            count=1,
+        )
+        if "token:" not in text.split("\napi:")[1].split("\n\n")[0]:
+            # token field missing under api:
+            text = text.replace("\napi:", f"\napi:\n  token: \"{new_token}\"", 1)
+    else:
+        text += f"\n# REST API + dashboard\napi:\n  token: \"{new_token}\"\n  bind_host: \"127.0.0.1\"\n  bind_port: 8765\n"
+    cfg.path.write_text(text)
+    click.secho(f"✅ Token saved to {cfg.path}", fg="green")
+    click.echo()
+    click.echo("Token (give this to the dashboard login or curl -H 'Authorization: Bearer ...'):")
+    click.secho(f"  {new_token}", fg="yellow")
+    click.echo()
+    click.echo("Next steps:")
+    click.echo("  sudo watchlog api install-service")
+    click.echo("  sudo systemctl start watchlog-api")
+
+
+@api.command(name="serve", help="Run the API server in foreground (blocks).")
+@click.option("--host", default=None, help="Bind host (default: from config or 127.0.0.1)")
+@click.option("--port", default=None, type=int, help="Bind port (default: from config or 8765)")
+@click.pass_context
+def api_serve(ctx: click.Context, host: str | None, port: int | None) -> None:
+    cfg = load_config(ctx.obj.get("config_path"))
+    api_cfg = cfg.get("api", default={}) or {}
+    h = host or api_cfg.get("bind_host", "127.0.0.1")
+    p = int(port or api_cfg.get("bind_port", 8765))
+    from watchlog.api import serve as api_serve_main  # noqa: PLC0415
+    api_serve_main(cfg, host=h, port=p)
+
+
+@api.command(
+    name="install-service",
+    help="Install systemd service for the API daemon.",
+)
+def api_install_service() -> None:
+    import shutil  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import textwrap  # noqa: PLC0415
+
+    if shutil.which("systemctl") is None:
+        click.echo("systemctl not found.", err=True)
+        sys.exit(1)
+    bin_path = shutil.which("watchlog") or "/usr/local/bin/watchlog"
+    service = textwrap.dedent(
+        f"""\
+        [Unit]
+        Description=watchlog REST API + dashboard daemon
+        After=network-online.target
+        Wants=network-online.target
+
+        [Service]
+        Type=simple
+        ExecStart={bin_path} api serve
+        Restart=on-failure
+        RestartSec=10s
+        # Run as root so the API can `unattended-upgrade` and `watchlog run`.
+        User=root
+
+        [Install]
+        WantedBy=multi-user.target
+        """
+    )
+    Path("/etc/systemd/system/watchlog-api.service").write_text(service)
+    subprocess.run(["systemctl", "daemon-reload"], check=True)
+    subprocess.run(["systemctl", "enable", "watchlog-api.service"], check=True)
+    click.echo("✅ Installed watchlog-api.service.")
+    click.echo("   Start: sudo systemctl start watchlog-api")
+    click.echo("   Logs: journalctl -u watchlog-api -f")
+
+
 if __name__ == "__main__":
     main()

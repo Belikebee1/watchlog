@@ -202,12 +202,65 @@ journalctl -u watchlog-bot -f       # tail logs
 
 The daemon only accepts callbacks from the configured `chat_id` — any other chat is silently rejected and logged.
 
+## REST API + Web dashboard (v0.3)
+
+watchlog ships with an optional FastAPI daemon that exposes the same data the Telegram bot uses, plus a self-hosted web dashboard. Useful when you want a glanceable view of multiple checks at once, or when you want to integrate watchlog with other tooling (mobile apps, monitoring dashboards, scripts).
+
+### Setup
+
+```bash
+# Install with API extras
+pip install 'git+https://github.com/Belikebee1/watchlog.git#egg=watchlog[api]'
+
+# Generate token (writes to /etc/watchlog/config.yaml under api.token)
+sudo watchlog api setup
+
+# Install + start daemon (binds to 127.0.0.1:8765 by default)
+sudo watchlog api install-service
+sudo systemctl start watchlog-api
+
+# Verify
+curl https://api.your-domain/api/v1/health
+```
+
+Put nginx in front with TLS, e.g. `api.watchlog.pl`. The daemon binds to `127.0.0.1` so it's never reachable directly from the internet.
+
+### Endpoints (all require `Authorization: Bearer <token>` except `/api/v1/health`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Dashboard SPA |
+| `GET` | `/api/v1/health` | Liveness check (public) |
+| `GET` | `/api/v1/status` | Latest heartbeat with `age_seconds` |
+| `GET` | `/api/v1/reports` | List of archived run dates |
+| `GET` | `/api/v1/reports/{date}` | Runs for a specific day |
+| `POST` | `/api/v1/runs` | Trigger fresh `watchlog run` |
+| `GET` | `/api/v1/state` | Current snoozes + ignores |
+| `POST` | `/api/v1/state/snooze` | `{check, hours}` |
+| `POST` | `/api/v1/state/ignore` | `{check}` |
+| `DELETE` | `/api/v1/state/snooze/{check}` | Un-snooze |
+| `DELETE` | `/api/v1/state/ignore/{check}` | Un-ignore |
+| `POST` | `/api/v1/actions/apply-security` | Run `unattended-upgrade -v` |
+
+Full OpenAPI/Swagger UI at `/docs`.
+
+### Dashboard
+
+Vanilla HTML/JS, no framework. Login screen accepts the token, stores it in `localStorage`, and shows:
+
+- Severity banner (color-coded by worst severity)
+- Action buttons: Apply security · Run watchlog now · Clear snoozes
+- Per-check list with inline Snooze 4h / Ignore / Clear buttons
+- Output drawer for command results (apt, watchlog run output)
+- Auto-refresh every 60s
+
 ## Roadmap
 
 - ✅ **v0.1** — 9 checks, stdout/email/JSON/status_file reporters, systemd installer
 - ✅ **v0.2** — Telegram bot reporter with interactive buttons (Apply / Snooze / Ignore)
-- 📱 **v0.3** — REST API daemon, web dashboard, action endpoints for mobile clients
+- ✅ **v0.3** — REST API + web dashboard with Bearer auth, action endpoints
 - 🛡️ **v0.4** — fail2ban stats, open-ports baseline diff, file integrity (AIDE), CVE matching
+- 📱 **v0.5** — Native mobile app (iOS/Android with FCM push) — uses v0.3 API as backend
 
 ## License
 
