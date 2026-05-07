@@ -76,6 +76,7 @@ from watchlog.auth import (
     TokenStore,
     audit,
 )
+from watchlog.check_info import CHECK_INFO, SEVERITY_LEGEND
 from watchlog.core.config import Config
 from watchlog.fcm import TokenRegistry
 from watchlog.state import State
@@ -426,6 +427,24 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/v1/state", tags=["state"], dependencies=[Depends(require_read)])
     def get_state() -> dict[str, Any]:
         return State.load().to_dict()
+
+    # --------------- protected — check explainers ---------------
+
+    @app.get(
+        "/api/v1/checks/info",
+        tags=["meta"],
+        dependencies=[Depends(require_read)],
+    )
+    def checks_info() -> dict[str, Any]:
+        """Return human-readable explanations for every check + the
+        severity legend. Both are bilingual (en/pl); mobile picks based
+        on locale and falls back to en. Static, generic across
+        deployments — safe to cache aggressively client-side."""
+        return {
+            "checks": CHECK_INFO,
+            "severity": SEVERITY_LEGEND,
+            "version": __version__,
+        }
 
     @app.post("/api/v1/state/snooze", tags=["state"], dependencies=[Depends(require_act)])
     def snooze(body: SnoozeRequest) -> dict[str, Any]:
