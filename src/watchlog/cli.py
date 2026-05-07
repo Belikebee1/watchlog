@@ -571,5 +571,229 @@ def api_install_service() -> None:
     click.echo("   Logs: journalctl -u watchlog-api -f")
 
 
+@api.command(
+    name="qr",
+    help="Generate a one-time pairing code (and QR) so a mobile app can pair without typing the token.",
+)
+@click.option(
+    "--ttl",
+    type=int,
+    default=300,
+    show_default=True,
+    help="How long the code stays valid, in seconds (max 600).",
+)
+@click.option(
+    "--scope",
+    "scopes",
+    type=click.Choice(["read", "act", "push"]),
+    multiple=True,
+    help="Limit the issued token to specific scopes (default: all three).",
+)
+@click.option(
+    "--watch/--no-watch",
+    default=True,
+    show_default=True,
+    help="Wait in the foreground until the code is redeemed or expires.",
+)
+def api_qr(ttl: int, scopes: tuple[str, ...], watch: bool) -> None:
+    """Print a QR code containing the pairing payload for a mobile client.
+
+    The mobile app scans the QR, POSTs the embedded code to /api/v1/pair,
+    and receives a fresh per-device token. The token's plaintext is
+    delivered ONCE over HTTPS — never written to disk on this server.
+    """
+    from watchlog.auth import PairingStore  # noqa: PLC0415
+
+    try:
+        import qrcode  # noqa: PLC0415
+    except ImportError:
+        click.secho(
+            "qrcode library missing — pip install 'watchlog[api]'",
+            fg="red",
+            err=True,
+        )
+        sys.exit(1)
+
+    store = PairingStore()
+    pairing = store.generate(
+        ttl_seconds=ttl,
+        scopes=list(scopes) if scopes else None,
+    )
+
+    code = pairing["code"]
+    expires_at = pairing["expires_at"]
+
+    # Resolve the public-facing API URL. Prefer api.public_url from config
+    # (operator override), then api.bind_host:bind_port, then a sane guess.
+    cfg = load_config(None)
+    api_cfg = cfg.get("api", default={}) or {}
+    public_url = api_cfg.get("public_url")
+    if not public_url:
+        host = api_cfg.get("bind_host", "127.0.0.1")
+        port = api_cfg.get("bind_port", 8765)
+        public_url = f"http://{host}:{port}"
+
+    # Suggested name for the mobile-side label, also derived from config.
+    suggested_name = api_cfg.get("name") or _hostname()
+
+    payload = {
+        "v": 1,
+        "kind": "watchlog_pairing",
+        "baseUrl": public_url,
+        "code": code,
+        "name": suggested_name,
+    }
+    payload_json = json.dumps(payload, separators=(",", ":"))
+
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=1,
+        border=2,
+    )
+    qr.add_data(payload_json)
+    qr.make(fit=True)
+
+    click.echo()
+    qr.print_ascii(invert=True)
+    click.echo()
+    click.echo(f"  Code:        {click.style(code, fg='yellow', bold=True)}")
+    click.echo(f"  baseUrl:     {public_url}")
+    click.echo(f"  Server name: {suggested_name}")
+    click.echo(f"  Scopes:      {', '.join(pairing['scopes'])}")
+    click.echo(f"  Valid until: {expires_at}  (TTL {ttl}s)")
+    click.echo()
+    click.echo(
+        "  Open the watchlog mobile app → Add server → Scan QR. Or paste\n"
+        "  the code manually if scanning isn't available."
+    )
+    click.echo()
+    if not watch:
+        return
+
+    # Watch mode: poll the pairings file until this code is redeemed,
+    # expired, or locked out. Print the redeemer info on success.
+    import time as _time  # noqa: PLC0415
+    from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+
+    try:
+        expires = _dt.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except ValueError:
+        return
+
+    click.echo(click.style("  Waiting for redemption...", fg="cyan"))
+    click.echo("  (Ctrl-C to stop watching — the code remains valid until TTL.)")
+    click.echo()
+
+    try:
+        while True:
+            current = store._load()  # noqa: SLF001
+            for p in current.get("pairings", []):
+                if p.get("code") != code:
+                    continue
+                if p.get("used"):
+                    label = p.get("redeemed_token_id") or "?"
+                    ip = p.get("redeemed_ip") or "?"
+                    when = p.get("redeemed_at") or "?"
+                    click.secho(
+                        f"  ✅ Paired! token_id={label}  ip={ip}  at={when}",
+                        fg="green",
+                    )
+                    return
+                if p.get("locked_out"):
+                    click.secho(
+                        "  ❌ Code locked out after too many failed attempts.",
+                        fg="red",
+                    )
+                    return
+                break
+            if _dt.now(_tz.utc) >= expires:
+                click.secho("  ⌛ Code expired without redemption.", fg="yellow")
+                return
+            _time.sleep(1)
+    except KeyboardInterrupt:
+        click.echo()
+        click.echo(click.style("  (stopped watching — code still valid)", fg="cyan"))
+
+
+@api.group(name="tokens", help="Manage per-device API tokens issued by pairing.")
+def api_tokens() -> None:
+    pass
+
+
+@api_tokens.command(name="list", help="Show every active per-device token.")
+def api_tokens_list() -> None:
+    from watchlog.auth import TokenStore  # noqa: PLC0415
+
+    store = TokenStore()
+    rows = store.list_active()
+    if not rows:
+        click.echo("No per-device tokens issued yet.")
+        click.echo()
+        click.echo("Issue one with: sudo watchlog api qr")
+        return
+    click.echo(f"{len(rows)} active token(s):")
+    click.echo()
+    for r in rows:
+        label = r.get("device_label") or "(no label)"
+        platform = r.get("platform") or "?"
+        scopes = ",".join(r.get("scopes") or [])
+        last_used = r.get("last_used_at") or "(never used)"
+        last_ip = r.get("last_used_ip") or "?"
+        created = r.get("created_at") or "?"
+        click.echo(f"  {click.style(r['id'], fg='cyan')}  [{platform}]  {label}")
+        click.echo(f"     scopes={scopes}")
+        click.echo(f"     created={created}")
+        click.echo(f"     last_used={last_used} from {last_ip}")
+        click.echo()
+
+
+@api_tokens.command(name="revoke", help="Revoke a single token by id (e.g. tok_abc...).")
+@click.argument("token_id")
+@click.option("--reason", default="user", help="Reason recorded in audit log.")
+def api_tokens_revoke(token_id: str, reason: str) -> None:
+    from watchlog.auth import TokenStore  # noqa: PLC0415
+
+    store = TokenStore()
+    if store.revoke(token_id, reason=reason):
+        click.secho(f"✅ Revoked {token_id}", fg="green")
+    else:
+        click.secho(
+            f"⚠️  No active token with id {token_id}", fg="yellow", err=True
+        )
+        sys.exit(1)
+
+
+@api_tokens.command(
+    name="revoke-all",
+    help="Revoke EVERY per-device token. The legacy `api.token` admin token is unaffected.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the confirmation prompt.",
+)
+def api_tokens_revoke_all(yes: bool) -> None:
+    from watchlog.auth import TokenStore  # noqa: PLC0415
+
+    if not yes and not click.confirm(
+        "Revoke every per-device API token? Mobile clients will be signed out.",
+        default=False,
+    ):
+        click.echo("Aborted.")
+        return
+    store = TokenStore()
+    count = store.revoke_all(reason="revoke_all_cli")
+    click.secho(f"✅ Revoked {count} token(s)", fg="green")
+
+
+def _hostname() -> str:
+    import socket as _sock  # noqa: PLC0415
+    try:
+        return _sock.gethostname() or "watchlog"
+    except OSError:
+        return "watchlog"
+
+
 if __name__ == "__main__":
     main()

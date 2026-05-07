@@ -1,9 +1,11 @@
 """REST API daemon — FastAPI app exposing watchlog state and actions over HTTP.
 
-Endpoints (all require Bearer auth except /health and /):
+Endpoints:
     GET  /                          Dashboard SPA (HTML)
     GET  /api/v1                    API metadata
     GET  /api/v1/health             Public liveness
+    POST /api/v1/pair               Exchange pairing code for per-device token
+                                    (rate-limited, no auth required)
     GET  /api/v1/status             Latest heartbeat (status.json)
     GET  /api/v1/reports            List recent run archives
     GET  /api/v1/reports/{date}     Runs for a specific day (YYYY-MM-DD)
@@ -14,8 +16,23 @@ Endpoints (all require Bearer auth except /health and /):
     DELETE /api/v1/state/snooze/{check}
     DELETE /api/v1/state/ignore/{check}
     POST /api/v1/actions/apply-security    Run unattended-upgrade
+    POST /api/v1/push/register      Register FCM token for this device
+    DELETE /api/v1/push/register/{token}
 
-The token is read from /etc/watchlog/config.yaml -> api.token (or generated if missing).
+Authentication: every protected endpoint accepts a Bearer token. Tokens
+come from two places:
+
+  1. The legacy `api.token` in /etc/watchlog/config.yaml — treated as the
+     "admin" / master token with full scopes. Cannot be revoked through the
+     API; only by editing the config and restarting.
+
+  2. Per-device tokens issued by `POST /api/v1/pair` (created via
+     `watchlog api qr` on the server). Each lives in tokens.json with a
+     SHA-256 hash; the plaintext is shown ONCE at issuance and never
+     persisted. Revocable via `watchlog api tokens revoke <id>`.
+
+Scopes (per-device tokens only): `read`, `act`, `push`. The admin token
+implicitly has every scope.
 """
 
 from __future__ import annotations
@@ -24,13 +41,14 @@ import json
 import logging
 import secrets
 import shlex
+import socket
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 try:
-    from fastapi import Depends, FastAPI, HTTPException, Path as FPath, status
+    from fastapi import Depends, FastAPI, HTTPException, Path as FPath, Request, status
     from fastapi.responses import FileResponse, JSONResponse
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
     from fastapi.staticfiles import StaticFiles
@@ -40,7 +58,24 @@ except ImportError as exc:  # pragma: no cover
         "watchlog[api] extras not installed. Run: pip install 'watchlog[api]'"
     ) from exc
 
+try:
+    from slowapi import Limiter
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.util import get_remote_address
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "slowapi missing — pip install 'watchlog[api]'"
+    ) from exc
+
 from watchlog import __version__
+from watchlog.auth import (
+    ALL_SCOPES,
+    PAIRING_DEFAULT_TTL_SECONDS,
+    PairingError,
+    PairingStore,
+    TokenStore,
+    audit,
+)
 from watchlog.core.config import Config
 from watchlog.fcm import TokenRegistry
 from watchlog.state import State
@@ -83,6 +118,32 @@ class PushRegisterRequest(BaseModel):
     )
 
 
+class PairRequest(BaseModel):
+    code: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        description="Pairing code from `watchlog api qr` (case-insensitive)",
+    )
+    device_label: str | None = Field(
+        None,
+        max_length=100,
+        description="Human-readable device name shown in `watchlog api tokens list`",
+    )
+    platform: str | None = Field(
+        None,
+        max_length=20,
+        description="android | ios | other",
+    )
+
+
+class PairResponse(BaseModel):
+    token: str = Field(..., description="The plaintext API token — store securely, never sent again")
+    device_id: str = Field(..., description="Stable identifier for revocation via `watchlog api tokens revoke`")
+    name: str = Field(..., description="Suggested display name for this server (hostname-derived)")
+    scopes: list[str] = Field(..., description="Granted scopes: read | act | push")
+
+
 class ActionResult(BaseModel):
     ok: bool
     exit_code: int
@@ -96,40 +157,131 @@ class ActionResult(BaseModel):
 def create_app(config: Config) -> FastAPI:
     """Build a FastAPI app bound to the given config.
 
-    The token comes from config.notifications.api.token. If absent, the API will
-    run open — DON'T DO THIS IF THE PORT IS PUBLIC. The CLI generates a token on
-    install if none exists.
+    Authentication accepts both:
+      * the legacy `api.token` from /etc/watchlog/config.yaml (master/admin)
+      * any non-revoked per-device token from /var/lib/watchlog/tokens.json,
+        granted scope-by-scope as configured at issuance time
+
+    If neither token source has any entries, the API runs open (only
+    /api/v1/health and / are exposed; everything else 401s). This is a
+    safety net during initial install, not a feature — the CLI bootstraps
+    a master token on first run.
     """
     api_cfg = config.get("api", default={}) or {}
-    expected_token: str = (api_cfg.get("token") if isinstance(api_cfg, dict) else "") or ""
+    admin_token: str = (api_cfg.get("token") if isinstance(api_cfg, dict) else "") or ""
+    token_store = TokenStore()
+    pairing_store = PairingStore()
+
+    # Suggested display name for the server, returned alongside paired
+    # tokens so the mobile app can pre-fill its label field.
+    server_display_name = _server_display_name(config)
+
+    limiter = Limiter(key_func=get_remote_address)
 
     app = FastAPI(
         title="watchlog API",
         version=__version__,
         description=(
             "REST API for the watchlog server health monitor. "
-            "All endpoints except `/api/v1/health` and `/` require Bearer authentication."
+            "Most endpoints require Bearer authentication. Use "
+            "`POST /api/v1/pair` with a code from `watchlog api qr` to "
+            "obtain a per-device token."
         ),
         docs_url="/docs",
         redoc_url=None,
     )
 
+    # Wire SlowAPI's rate-limit error handler so 429s come back as JSON
+    # rather than the default plain text.
+    app.state.limiter = limiter
+
+    @app.exception_handler(RateLimitExceeded)
+    def _rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests. Please slow down."},
+        )
+
     # --------------- auth dependency ---------------
 
-    def require_token(
-        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    def _verify_bearer(
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None,
+        required_scope: str,
     ) -> None:
-        if not expected_token:
-            # Open mode — caller is responsible for not exposing this publicly.
+        # Open mode — only when neither admin token nor any per-device tokens
+        # are configured. Lets `watchlog api setup` work during bootstrap.
+        if not admin_token and not token_store.list_active():
             return
-        if creds is None or creds.scheme.lower() != "bearer" or not secrets.compare_digest(
-            creds.credentials, expected_token
-        ):
+
+        if creds is None or creds.scheme.lower() != "bearer":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing Bearer token",
+                detail="Missing Bearer token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+        presented = creds.credentials
+
+        # Admin token: constant-time compare against the configured master.
+        # Implicitly has every scope, never logs to "last used" since it's
+        # a static secret on disk.
+        if admin_token and secrets.compare_digest(presented, admin_token):
+            return
+
+        # Per-device token: hash and look up. Lookup is constant-time per
+        # candidate; total work is O(n) over registry size, which is fine
+        # at the expected scale (handful of devices).
+        record = token_store.find_by_token(presented)
+        if record is None:
+            audit(
+                "TOKEN_AUTH_FAILED",
+                ip=_client_ip(request),
+                path=request.url.path,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or revoked token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        scopes = record.get("scopes") or []
+        if required_scope not in scopes:
+            audit(
+                "TOKEN_FORBIDDEN",
+                token_id=record.get("id"),
+                required=required_scope,
+                granted=scopes,
+                path=request.url.path,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Token missing scope: {required_scope}",
+            )
+
+        # Best-effort touch — never blocks request on file write.
+        try:
+            token_store.touch(record["id"], _client_ip(request))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("touch failed: %s", exc)
+
+    def require_read(
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    ) -> None:
+        _verify_bearer(request, creds, "read")
+
+    def require_act(
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    ) -> None:
+        _verify_bearer(request, creds, "act")
+
+    def require_push(
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    ) -> None:
+        _verify_bearer(request, creds, "push")
 
     # --------------- public endpoints ---------------
 
@@ -155,9 +307,57 @@ def create_app(config: Config) -> FastAPI:
     def healthz() -> HealthResponse:
         return HealthResponse(version=__version__)
 
+    # --------------- public — pairing exchange ---------------
+
+    @app.post(
+        "/api/v1/pair",
+        response_model=PairResponse,
+        tags=["pair"],
+        responses={
+            401: {"description": "Invalid, expired, used, or locked-out code"},
+            429: {"description": "Rate limit exceeded"},
+        },
+    )
+    @limiter.limit("10/minute")
+    def pair(request: Request, body: PairRequest) -> PairResponse:
+        """Exchange a short-lived pairing code for a per-device API token.
+
+        The code is single-use, time-limited (5 min default), and locks out
+        after 3 failed attempts. The plaintext token returned here is the
+        only time it appears — the server stores only its SHA-256 hash.
+        Rate-limited per source IP to defeat online brute force.
+        """
+        ip = _client_ip(request)
+        try:
+            issued, _record = pairing_store.redeem(
+                body.code,
+                ip=ip,
+                device_label=body.device_label,
+                platform=body.platform,
+                token_store=token_store,
+            )
+        except PairingError as err:
+            # Penalize the specific code (lock out after 3 strikes) so a
+            # leaked code can't be brute-forced even within rate limits.
+            try:
+                pairing_store.record_failed_attempt(err.code, ip)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("record_failed_attempt: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(err),
+            ) from err
+
+        return PairResponse(
+            token=issued.plaintext,
+            device_id=issued.record["id"],
+            name=server_display_name,
+            scopes=list(issued.record.get("scopes") or []),
+        )
+
     # --------------- protected — status & reports ---------------
 
-    @app.get("/api/v1/status", tags=["status"], dependencies=[Depends(require_token)])
+    @app.get("/api/v1/status", tags=["status"], dependencies=[Depends(require_read)])
     def get_status() -> JSONResponse:
         """Return the latest heartbeat — same shape as public /status.json."""
         state_cfg = config.get("notifications", "status_file", default={}) or {}
@@ -185,7 +385,7 @@ def create_app(config: Config) -> FastAPI:
             data["age_seconds"] = None
         return JSONResponse(data)
 
-    @app.get("/api/v1/reports", tags=["reports"], dependencies=[Depends(require_token)])
+    @app.get("/api/v1/reports", tags=["reports"], dependencies=[Depends(require_read)])
     def list_reports() -> dict[str, Any]:
         log_dir = Path(config.get("state", "log_dir", default="/var/log/watchlog") or
                        "/var/log/watchlog")
@@ -200,7 +400,7 @@ def create_app(config: Config) -> FastAPI:
     @app.get(
         "/api/v1/reports/{date}",
         tags=["reports"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_read)],
     )
     def get_reports_for(date: str = FPath(..., pattern=r"^\d{4}-\d{2}-\d{2}$")) -> Any:
         log_dir = Path(config.get("state", "log_dir", default="/var/log/watchlog") or
@@ -216,24 +416,24 @@ def create_app(config: Config) -> FastAPI:
         "/api/v1/runs",
         response_model=ActionResult,
         tags=["actions"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_act)],
     )
     def trigger_run() -> ActionResult:
         return _run_command(["watchlog", "run"])
 
     # --------------- protected — state (snooze/ignore) ---------------
 
-    @app.get("/api/v1/state", tags=["state"], dependencies=[Depends(require_token)])
+    @app.get("/api/v1/state", tags=["state"], dependencies=[Depends(require_read)])
     def get_state() -> dict[str, Any]:
         return State.load().to_dict()
 
-    @app.post("/api/v1/state/snooze", tags=["state"], dependencies=[Depends(require_token)])
+    @app.post("/api/v1/state/snooze", tags=["state"], dependencies=[Depends(require_act)])
     def snooze(body: SnoozeRequest) -> dict[str, Any]:
         until = datetime.now(timezone.utc) + timedelta(hours=body.hours)
         State.load().snooze(body.check, until, by="api")
         return {"ok": True, "check": body.check, "until": until.isoformat()}
 
-    @app.post("/api/v1/state/ignore", tags=["state"], dependencies=[Depends(require_token)])
+    @app.post("/api/v1/state/ignore", tags=["state"], dependencies=[Depends(require_act)])
     def ignore_check(body: IgnoreRequest) -> dict[str, Any]:
         State.load().ignore(body.check, by="api")
         return {"ok": True, "check": body.check}
@@ -241,7 +441,7 @@ def create_app(config: Config) -> FastAPI:
     @app.delete(
         "/api/v1/state/snooze/{check}",
         tags=["state"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_act)],
     )
     def unsnooze(check: str) -> dict[str, Any]:
         State.load().unsnooze(check)
@@ -250,7 +450,7 @@ def create_app(config: Config) -> FastAPI:
     @app.delete(
         "/api/v1/state/ignore/{check}",
         tags=["state"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_act)],
     )
     def unignore(check: str) -> dict[str, Any]:
         State.load().unignore(check)
@@ -262,7 +462,7 @@ def create_app(config: Config) -> FastAPI:
         "/api/v1/actions/apply-security",
         response_model=ActionResult,
         tags=["actions"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_act)],
     )
     def apply_security() -> ActionResult:
         return _run_command(["unattended-upgrade", "-v"])
@@ -272,7 +472,7 @@ def create_app(config: Config) -> FastAPI:
     @app.post(
         "/api/v1/push/register",
         tags=["push"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_push)],
     )
     def push_register(body: PushRegisterRequest) -> dict[str, Any]:
         registry = TokenRegistry()
@@ -286,7 +486,7 @@ def create_app(config: Config) -> FastAPI:
     @app.delete(
         "/api/v1/push/register/{token}",
         tags=["push"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_push)],
     )
     def push_unregister(token: str) -> dict[str, Any]:
         registry = TokenRegistry()
@@ -296,7 +496,7 @@ def create_app(config: Config) -> FastAPI:
     @app.get(
         "/api/v1/push/devices",
         tags=["push"],
-        dependencies=[Depends(require_token)],
+        dependencies=[Depends(require_push)],
     )
     def push_list() -> dict[str, Any]:
         registry = TokenRegistry()
@@ -314,6 +514,32 @@ def create_app(config: Config) -> FastAPI:
         }
 
     return app
+
+
+def _server_display_name(config: Config) -> str:
+    """Best-effort display name for this server, used as a hint for newly
+    paired mobile clients. Prefers an explicit `api.name` config value,
+    falling back to the system hostname."""
+    api_cfg = config.get("api", default={}) or {}
+    explicit = api_cfg.get("name") if isinstance(api_cfg, dict) else None
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    try:
+        return socket.gethostname() or "watchlog"
+    except OSError:
+        return "watchlog"
+
+
+def _client_ip(request: Request) -> str | None:
+    """Extract the client IP, honoring X-Forwarded-For when the daemon is
+    behind a reverse proxy (nginx). Falls back to the direct peer."""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        # Use the leftmost address — that's the original client per RFC 7239
+        return fwd.split(",", 1)[0].strip() or None
+    if request.client:
+        return request.client.host
+    return None
 
 
 def _run_command(argv: list[str]) -> ActionResult:

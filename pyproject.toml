@@ -33,7 +33,13 @@ dependencies = [
 
 [project.optional-dependencies]
 telegram = ["python-telegram-bot>=21.0"]
-api = ["fastapi>=0.110", "uvicorn[standard]>=0.27", "pydantic>=2.5"]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.5",
+    "qrcode>=7.4",
+    "slowapi>=0.1.9",
+]
 fcm = ["firebase-admin>=6.5"]
 dev = ["pytest>=8.0", "ruff>=0.4", "mypy>=1.10"]
 
