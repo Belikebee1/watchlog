@@ -72,10 +72,16 @@ class FcmPushReporter(Reporter):
         token_store = TokenStore()
         delivery_targets: list[str] = []
         suppressed = 0
+        actionable_check_names = [r.check_name for r in actionable]
         for fcm_token in tokens:
             api_id = registry.api_token_id_for(fcm_token)
             prefs = token_store.get_preferences(api_id) if api_id else None
-            if prefs is None or should_deliver(prefs, actual_worst.name):
+            ok = prefs is None or should_deliver(
+                prefs,
+                actual_worst.name,
+                actionable_checks=actionable_check_names,
+            )
+            if ok:
                 delivery_targets.append(fcm_token)
             else:
                 suppressed += 1

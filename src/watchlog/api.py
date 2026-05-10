@@ -153,6 +153,12 @@ class NotificationPreferencesPayload(BaseModel):
         pattern=r"^(OK|INFO|WARN|CRITICAL)$",
         description="Global floor — alerts below this never push.",
     )
+    disabled_checks: list[str] | None = Field(
+        None,
+        max_length=64,
+        description="Checks to mute. If every actionable check in a run "
+                    "is on this list, the device gets no push.",
+    )
 
 
 class PairRequest(BaseModel):

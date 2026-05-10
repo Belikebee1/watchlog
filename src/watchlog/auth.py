@@ -110,6 +110,15 @@ def _default_notification_prefs() -> dict[str, Any]:
         "quiet_timezone": None,
         "quiet_min_severity": "CRITICAL",
         "min_severity": "WARN",
+        # Phase 2F: per-check muting. Names of checks the user does
+        # not want push notifications about — e.g. ["apt_updates",
+        # "fail2ban_stats"]. Server-side semantics: if EVERY actionable
+        # check in a given run is on this list, the push is suppressed
+        # for the device. If at least one non-disabled check fired,
+        # the standard "N items need attention" push goes through (it
+        # may still mention disabled checks in the title — we don't
+        # rewrite per-device messages yet, that's a future refinement).
+        "disabled_checks": [],
     }
 
 
@@ -117,20 +126,31 @@ def should_deliver(
     prefs: dict[str, Any],
     severity: str,
     *,
+    actionable_checks: list[str] | None = None,
     now: datetime | None = None,
 ) -> bool:
     """Evaluate a device's notification preferences for an alert at the
     given severity. Returns True if the push should be delivered.
 
     Logic:
-      1. If severity < min_severity, drop. (per-device floor)
-      2. If quiet_hours_enabled and we're inside the quiet window AND
+      1. If actionable_checks is provided AND every name in it is on
+         the device's disabled_checks list, drop. This handles the
+         per-check muting introduced in Phase 2F: a run consisting
+         only of muted checks raises no push for this device, but
+         a mixed run still delivers.
+      2. If severity < min_severity, drop. (per-device floor)
+      3. If quiet_hours_enabled AND we're inside the quiet window AND
          severity < quiet_min_severity, drop.
-      3. Otherwise deliver.
+      4. Otherwise deliver.
 
     The `now` arg is provided for testability — callers normally leave
     it None and we use the current UTC instant.
     """
+    disabled = set(prefs.get("disabled_checks") or [])
+    if actionable_checks and disabled:
+        if all(name in disabled for name in actionable_checks):
+            return False
+
     sev = severity_rank(severity)
     floor = severity_rank(prefs.get("min_severity", "WARN"))
     if sev < floor:
