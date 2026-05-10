@@ -4,9 +4,9 @@ The output is a single, small JSON document at a configured path (e.g. served by
 Nginx as /status.json on a public domain). Use case: external uptime checks
 that want to confirm "watchlog itself is still running daily" without SSH access.
 
-Schema (stable):
+Schema (stable, schema_version 2):
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "ran_at": "2026-05-02T07:45:00+00:00",   # UTC ISO 8601
   "host": "myserver",                       # hostname
   "watchlog_version": "0.1.0",
@@ -15,8 +15,19 @@ Schema (stable):
   "counts": {"OK": 7, "INFO": 1, "WARN": 1, "CRITICAL": 0},
   "actionable": [
     {"check": "ssl_certs", "severity": "WARN", "title": "..."}
-  ]
+  ],
+  "metrics": {                              # added in v2
+    "disk_space": {"worst_used_pct": 35.3, ...},
+    "memory":     {"available_mb": 2244, ...},
+    ...
+  }
 }
+
+`metrics` is the structured numeric output of every check that
+populated `CheckResult.metrics` — primarily disk_space and memory,
+which the mobile dashboard surfaces as live bars. Other checks may
+contribute later (e.g. fail2ban current-banned count). Older v1
+clients ignore the field; v2 clients use it.
 """
 
 from __future__ import annotations
@@ -60,8 +71,15 @@ class StatusFileReporter(Reporter):
             if r.severity > Severity.OK
         ]
 
+        # Per-check structured metrics. Skip checks that didn't supply
+        # any — saves bytes in the public heartbeat without losing
+        # information.
+        metrics = {
+            r.check_name: r.metrics for r in results if r.metrics
+        }
+
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "ran_at": datetime.now(timezone.utc).isoformat(),
             "host": socket.gethostname(),
             "watchlog_version": __version__,
@@ -69,6 +87,7 @@ class StatusFileReporter(Reporter):
             "checks_total": len(results),
             "counts": counts,
             "actionable": actionable,
+            "metrics": metrics,
         }
 
         path = Path(path_str)

@@ -18,6 +18,10 @@ class CheckResult:
     summary:  short body (1-3 lines) explaining what was found
     details:  structured per-item details (e.g. list of outdated packages)
     actions:  suggested commands to fix it (e.g. "apt upgrade openssl")
+    metrics:  numeric facts the mobile UI renders as bars/sparklines —
+              e.g. {"used_pct": 35, "total_gb": 75}. Free-form per check;
+              the consumer matches on `check_name` to know what keys to
+              expect. Always JSON-safe (numbers, strings, booleans).
     """
 
     check_name: str
@@ -26,6 +30,7 @@ class CheckResult:
     summary: str = ""
     details: list[str] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def is_actionable(self) -> bool:
@@ -40,6 +45,7 @@ class CheckResult:
             "summary": self.summary,
             "details": self.details,
             "actions": self.actions,
+            "metrics": self.metrics,
             "timestamp": self.timestamp.isoformat(),
         }
 

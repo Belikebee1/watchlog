@@ -80,7 +80,7 @@ class DiskSpaceCheck(Check):
 
         rows.sort(key=lambda r: -r[3])  # most-full first
         worst = rows[0]
-        worst_mp, _t, _u, worst_pct = worst
+        worst_mp, worst_total, worst_used, worst_pct = worst
 
         if worst_pct >= crit_pct:
             severity = Severity.CRITICAL
@@ -94,9 +94,36 @@ class DiskSpaceCheck(Check):
             for mp, total, used, pct in rows
         ]
 
+        # Structured numeric snapshot for the mobile dashboard. Keys
+        # match the disk_space schema documented in CHECK_INFO so
+        # client-side parsers can rely on them.
+        metrics = {
+            "worst_mountpoint": worst_mp,
+            "worst_used_pct": round(worst_pct, 1),
+            "worst_used_gb": round(worst_used / 1e9, 1),
+            "worst_total_gb": round(worst_total / 1e9, 1),
+            "worst_free_gb": round((worst_total - worst_used) / 1e9, 1),
+            "warn_pct": warn_pct,
+            "critical_pct": crit_pct,
+            "mountpoints": [
+                {
+                    "path": mp,
+                    "used_pct": round(pct, 1),
+                    "used_gb": round(used / 1e9, 1),
+                    "total_gb": round(total / 1e9, 1),
+                    "free_gb": round((total - used) / 1e9, 1),
+                }
+                for mp, total, used, pct in rows
+            ],
+        }
+
         if severity == Severity.OK:
-            return self._ok(
-                f"Disk usage OK (worst: {worst_mp} at {worst_pct:.0f}%)", details=details
+            return CheckResult(
+                check_name=self.name,
+                severity=Severity.OK,
+                title=f"Disk usage OK (worst: {worst_mp} at {worst_pct:.0f}%)",
+                details=details,
+                metrics=metrics,
             )
 
         return CheckResult(
@@ -105,6 +132,7 @@ class DiskSpaceCheck(Check):
             title=f"Disk {worst_mp} is {worst_pct:.0f}% full",
             summary=f"Free up space on {worst_mp} or expand the volume.",
             details=details,
+            metrics=metrics,
             actions=[
                 f"du -sh {worst_mp}/* 2>/dev/null | sort -h | tail -20",
                 "docker system prune -af  # if Docker fills disk",

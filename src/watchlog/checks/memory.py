@@ -45,6 +45,16 @@ class MemoryCheck(Check):
             f"Used: {used_pct:.1f}%",
         ]
 
+        # Structured snapshot for the mobile live-metrics tile.
+        metrics = {
+            "available_mb": avail_mb,
+            "total_mb": total_mb,
+            "used_mb": max(0, total_mb - avail_mb),
+            "used_pct": round(used_pct, 1),
+            "warn_mb_free": warn_mb,
+            "critical_mb_free": crit_mb,
+        }
+
         if avail_mb < crit_mb:
             return CheckResult(
                 self.name,
@@ -52,6 +62,7 @@ class MemoryCheck(Check):
                 f"Only {avail_mb} MB RAM available",
                 summary="Server is critically low on memory. OOM killer may strike.",
                 details=details,
+                metrics=metrics,
                 actions=["ps aux --sort=-%mem | head -10", "free -h"],
             )
         if avail_mb < warn_mb:
@@ -61,6 +72,13 @@ class MemoryCheck(Check):
                 f"Low RAM: {avail_mb} MB available",
                 summary="Consider closing/restarting services with leaks.",
                 details=details,
+                metrics=metrics,
                 actions=["ps aux --sort=-%mem | head -10"],
             )
-        return self._ok(f"RAM OK ({avail_mb} MB / {total_mb} MB available)", details=details)
+        return CheckResult(
+            self.name,
+            Severity.OK,
+            f"RAM OK ({avail_mb} MB / {total_mb} MB available)",
+            details=details,
+            metrics=metrics,
+        )
