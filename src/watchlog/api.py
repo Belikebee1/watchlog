@@ -188,6 +188,46 @@ class ActionResult(BaseModel):
     command: str
 
 
+class RestartServiceRequest(BaseModel):
+    service: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._@-]+$",
+        description="systemd unit name. Must be on the actions.allowed_services whitelist.",
+    )
+
+
+class TailLogsRequest(BaseModel):
+    service: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._@-]+$",
+        description="systemd unit name (whitelisted) or 'system' for the journal.",
+    )
+    lines: int = Field(
+        100,
+        ge=10,
+        le=2000,
+        description="How many recent journal lines to return.",
+    )
+
+
+class ActionDescriptor(BaseModel):
+    """Metadata for one action shortcut available to clients. The
+    mobile UI iterates these to render its actions panel; ops can
+    add/remove without redeploying the app."""
+
+    kind: str = Field(..., description="restart_service | reboot | tail_logs")
+    target: str = Field(..., description="systemd unit name, or 'host' for reboot")
+    label: str = Field(..., description="Human-readable label")
+    destructive: bool = Field(
+        False,
+        description="UI hint — show in red and require extra confirmation.",
+    )
+
+
 # --------------- App factory ---------------
 
 
@@ -568,7 +608,161 @@ def create_app(config: Config) -> FastAPI:
         dependencies=[Depends(require_act)],
     )
     def apply_security() -> ActionResult:
+        audit("ACTION_APPLY_SECURITY")
         return _run_command(["unattended-upgrade", "-v"])
+
+    # --------------- protected — service / host actions (Phase 2D) ---------
+
+    @app.get(
+        "/api/v1/actions",
+        tags=["actions"],
+        dependencies=[Depends(require_read)],
+    )
+    def list_actions(request: Request) -> dict[str, Any]:
+        """List the action shortcuts the operator has enabled in
+        config.yaml. Mobile clients iterate this to render their
+        actions panel — services not on the whitelist simply don't
+        show up.
+
+        Read-scope is enough; the actions themselves are gated by
+        require_act when invoked.
+        """
+        actions_cfg = config.get("actions", default={}) or {}
+        allowed = actions_cfg.get("allowed_services") or []
+        allow_reboot = bool(actions_cfg.get("allow_reboot", False))
+        allow_logs = bool(actions_cfg.get("allow_logs", True))
+
+        descriptors: list[dict[str, Any]] = []
+        for svc in allowed:
+            if not isinstance(svc, str) or not svc:
+                continue
+            descriptors.append({
+                "kind": "restart_service",
+                "target": svc,
+                "label": f"Restart {svc}",
+                "destructive": False,
+            })
+            if allow_logs:
+                descriptors.append({
+                    "kind": "tail_logs",
+                    "target": svc,
+                    "label": f"Logs: {svc}",
+                    "destructive": False,
+                })
+        if allow_reboot:
+            descriptors.append({
+                "kind": "reboot",
+                "target": "host",
+                "label": "Reboot server",
+                "destructive": True,
+            })
+        return {"actions": descriptors}
+
+    @app.post(
+        "/api/v1/actions/restart-service",
+        response_model=ActionResult,
+        tags=["actions"],
+        dependencies=[Depends(require_act)],
+    )
+    def restart_service(
+        body: RestartServiceRequest,
+        request: Request,
+    ) -> ActionResult:
+        """Restart a single systemd unit. Service must be in the
+        operator's `actions.allowed_services` whitelist — anything
+        else is rejected. Audit log records the attempt regardless of
+        outcome."""
+        actions_cfg = config.get("actions", default={}) or {}
+        allowed = set(actions_cfg.get("allowed_services") or [])
+        if body.service not in allowed:
+            audit(
+                "ACTION_RESTART_DENIED",
+                service=body.service,
+                ip=_client_ip(request),
+                reason="not_whitelisted",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Service '{body.service}' is not on the allowed list. "
+                       f"Add it to actions.allowed_services in config.yaml.",
+            )
+        audit(
+            "ACTION_RESTART_SERVICE",
+            service=body.service,
+            ip=_client_ip(request),
+        )
+        return _run_command(["systemctl", "restart", body.service])
+
+    @app.post(
+        "/api/v1/actions/reboot",
+        response_model=ActionResult,
+        tags=["actions"],
+        dependencies=[Depends(require_act)],
+    )
+    def reboot_host(request: Request) -> ActionResult:
+        """Reboot the host. Disabled by default — operator must
+        explicitly set `actions.allow_reboot: true` in config.yaml.
+        We schedule the reboot one minute in the future so the API
+        response can return cleanly before the kernel comes down."""
+        actions_cfg = config.get("actions", default={}) or {}
+        if not actions_cfg.get("allow_reboot", False):
+            audit(
+                "ACTION_REBOOT_DENIED",
+                ip=_client_ip(request),
+                reason="disabled_in_config",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Reboot via API is disabled. Set "
+                       "actions.allow_reboot: true in config.yaml to allow it.",
+            )
+        audit("ACTION_REBOOT", ip=_client_ip(request))
+        # +1 means "+1 minute" — gives admins a window to abort with
+        # `shutdown -c` if the request was a mistake.
+        return _run_command(["shutdown", "-r", "+1", "watchlog API reboot"])
+
+    @app.post(
+        "/api/v1/actions/logs",
+        response_model=ActionResult,
+        tags=["actions"],
+        dependencies=[Depends(require_act)],
+    )
+    def tail_logs(
+        body: TailLogsRequest,
+        request: Request,
+    ) -> ActionResult:
+        """Stream the last N lines of journalctl output for a
+        whitelisted service. Read-only — no log mutation possible."""
+        actions_cfg = config.get("actions", default={}) or {}
+        allowed = set(actions_cfg.get("allowed_services") or [])
+        if not actions_cfg.get("allow_logs", True):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Log tailing via API is disabled.",
+            )
+        if body.service not in allowed and body.service != "system":
+            audit(
+                "ACTION_LOGS_DENIED",
+                service=body.service,
+                ip=_client_ip(request),
+                reason="not_whitelisted",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Service '{body.service}' is not on the allowed list.",
+            )
+        audit(
+            "ACTION_TAIL_LOGS",
+            service=body.service,
+            lines=body.lines,
+            ip=_client_ip(request),
+        )
+        if body.service == "system":
+            argv = ["journalctl", "-n", str(body.lines), "--no-pager"]
+        else:
+            argv = ["journalctl", "-u", body.service,
+                    "-n", str(body.lines), "--no-pager"]
+        return _run_command(argv)
 
     # --------------- protected — push notification registration ---------------
 
