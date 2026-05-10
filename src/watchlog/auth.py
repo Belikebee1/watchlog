@@ -76,6 +76,133 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _default_notification_prefs() -> dict[str, Any]:
+    """Default per-device notification preferences. Each new pairing
+    starts with these; the mobile app PATCHes overrides as the user
+    tweaks them.
+
+    Schema:
+        quiet_hours_enabled: bool
+            When false, quiet_* fields are ignored. Default off — pairing
+            shouldn't surprise the user with silent push.
+        quiet_start, quiet_end: 'HH:MM' 24h strings
+            The window during which notifications below
+            quiet_min_severity get suppressed. quiet_end <= quiet_start
+            is allowed and means "spans midnight" (the common case).
+        quiet_timezone: IANA name (e.g. 'Europe/Warsaw')
+            What clock the user's quiet window references. Falls back to
+            the server's timezone if missing — but the mobile app sends
+            the device's TZ at first save, so this is effectively
+            always set on real-world deployments.
+        quiet_min_severity: 'OK' / 'INFO' / 'WARN' / 'CRITICAL'
+            Severities at or above this threshold ALWAYS deliver, even
+            during quiet hours. Default 'CRITICAL' — quiet hours never
+            silence true emergencies.
+        min_severity: 'OK' / 'INFO' / 'WARN' / 'CRITICAL'
+            Global floor. Severities below this never push, regardless
+            of quiet hours. Default 'WARN' — same behavior as before
+            this knob existed.
+    """
+    return {
+        "quiet_hours_enabled": False,
+        "quiet_start": "22:00",
+        "quiet_end": "07:00",
+        "quiet_timezone": None,
+        "quiet_min_severity": "CRITICAL",
+        "min_severity": "WARN",
+    }
+
+
+def should_deliver(
+    prefs: dict[str, Any],
+    severity: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Evaluate a device's notification preferences for an alert at the
+    given severity. Returns True if the push should be delivered.
+
+    Logic:
+      1. If severity < min_severity, drop. (per-device floor)
+      2. If quiet_hours_enabled and we're inside the quiet window AND
+         severity < quiet_min_severity, drop.
+      3. Otherwise deliver.
+
+    The `now` arg is provided for testability — callers normally leave
+    it None and we use the current UTC instant.
+    """
+    sev = severity_rank(severity)
+    floor = severity_rank(prefs.get("min_severity", "WARN"))
+    if sev < floor:
+        return False
+
+    if not prefs.get("quiet_hours_enabled"):
+        return True
+
+    quiet_floor = severity_rank(prefs.get("quiet_min_severity", "CRITICAL"))
+    if sev >= quiet_floor:
+        return True  # critical override
+
+    if not _in_quiet_window(prefs, now=now):
+        return True
+    return False
+
+
+def _in_quiet_window(
+    prefs: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """True when the device's current local time falls inside its
+    configured quiet window. The window is interpreted in the device's
+    [quiet_timezone] (falling back to UTC if unset), so the check is
+    correct regardless of where the watchlog server itself runs."""
+    start_str = (prefs.get("quiet_start") or "").strip()
+    end_str = (prefs.get("quiet_end") or "").strip()
+    if not start_str or not end_str:
+        return False
+    try:
+        start_h, start_m = [int(x) for x in start_str.split(":", 1)]
+        end_h, end_m = [int(x) for x in end_str.split(":", 1)]
+    except ValueError:
+        return False
+
+    tz_name = prefs.get("quiet_timezone")
+    tz = None
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tz_name)
+        except Exception:  # noqa: BLE001
+            tz = None
+
+    instant = now or _utcnow()
+    if tz is not None:
+        instant = instant.astimezone(tz)
+    minutes = instant.hour * 60 + instant.minute
+    start_min = start_h * 60 + start_m
+    end_min = end_h * 60 + end_m
+    if start_min == end_min:
+        return False
+    if start_min < end_min:
+        return start_min <= minutes < end_min
+    # Spans midnight (e.g. 22:00 - 07:00).
+    return minutes >= start_min or minutes < end_min
+
+
+def severity_rank(name: str) -> int:
+    """Map a severity name to the same integer ordering as the Python
+    [Severity] enum. Used by the FCM filter when comparing the alert's
+    severity against the device's threshold without importing the runner
+    module (avoids circular imports)."""
+    return {
+        "OK": 0,
+        "INFO": 1,
+        "WARN": 2,
+        "CRITICAL": 3,
+    }.get((name or "").upper(), 1)
+
+
 def _hash_token(token: str) -> str:
     """SHA-256 of the plaintext token, hex-encoded."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -208,6 +335,9 @@ class TokenStore:
             "revoked": False,
             "revoked_at": None,
             "revoked_reason": None,
+            # Default notification preferences: no quiet hours, deliver
+            # everything at WARN+. Users tune these from the mobile app.
+            "notification_preferences": _default_notification_prefs(),
         }
         with self._lock:
             data = self._load()
@@ -222,6 +352,41 @@ class TokenStore:
             scopes=record["scopes"],
         )
         return IssuedToken(plaintext=plaintext, record=record)
+
+    def update_preferences(
+        self, token_id: str, prefs: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Replace the notification_preferences blob for a token. The
+        new prefs are merged on top of defaults so partial updates from
+        the client (e.g. just tweaking quiet_end) don't accidentally
+        clear other fields. Returns the resulting prefs dict, or None
+        if the token wasn't found / was revoked."""
+        with self._lock:
+            data = self._load()
+            for rec in data["tokens"]:
+                if rec.get("id") == token_id and not rec.get("revoked"):
+                    base = rec.get("notification_preferences") or {}
+                    merged = {**_default_notification_prefs(), **base, **prefs}
+                    rec["notification_preferences"] = merged
+                    self._save(data)
+                    audit(
+                        "TOKEN_PREFS_UPDATED",
+                        token_id=token_id,
+                        prefs=merged,
+                    )
+                    return merged
+        return None
+
+    def get_preferences(self, token_id: str) -> dict[str, Any]:
+        """Read the current preferences for a token, or defaults if the
+        token has none stored (older issuance)."""
+        with self._lock:
+            data = self._load()
+            for rec in data["tokens"]:
+                if rec.get("id") == token_id and not rec.get("revoked"):
+                    base = rec.get("notification_preferences") or {}
+                    return {**_default_notification_prefs(), **base}
+        return _default_notification_prefs()
 
     def find_by_token(self, plaintext: str) -> dict[str, Any] | None:
         """Return the active record for the given plaintext token, or None

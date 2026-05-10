@@ -120,6 +120,41 @@ class PushRegisterRequest(BaseModel):
     )
 
 
+class NotificationPreferencesPayload(BaseModel):
+    """Per-device notification preferences. Every field is optional;
+    omitted fields keep their previous value (PATCH semantics)."""
+
+    quiet_hours_enabled: bool | None = Field(
+        None,
+        description="Master switch for the quiet window.",
+    )
+    quiet_start: str | None = Field(
+        None,
+        pattern=r"^([01]?\d|2[0-3]):[0-5]\d$",
+        description="Local 24h start time, HH:MM.",
+    )
+    quiet_end: str | None = Field(
+        None,
+        pattern=r"^([01]?\d|2[0-3]):[0-5]\d$",
+        description="Local 24h end time, HH:MM.",
+    )
+    quiet_timezone: str | None = Field(
+        None,
+        max_length=64,
+        description="IANA tz name the device's quiet window is anchored to.",
+    )
+    quiet_min_severity: str | None = Field(
+        None,
+        pattern=r"^(OK|INFO|WARN|CRITICAL)$",
+        description="Minimum severity that bypasses quiet hours. Default CRITICAL.",
+    )
+    min_severity: str | None = Field(
+        None,
+        pattern=r"^(OK|INFO|WARN|CRITICAL)$",
+        description="Global floor — alerts below this never push.",
+    )
+
+
 class PairRequest(BaseModel):
     code: str = Field(
         ...,
@@ -508,9 +543,25 @@ def create_app(config: Config) -> FastAPI:
         tags=["push"],
         dependencies=[Depends(require_push)],
     )
-    def push_register(body: PushRegisterRequest) -> dict[str, Any]:
+    def push_register(
+        body: PushRegisterRequest,
+        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    ) -> dict[str, Any]:
+        # Resolve the calling per-device token so we can link the FCM
+        # token back to it. Quiet-hours / severity-floor filtering at
+        # send time uses this link to find the right preferences.
+        api_token_id: str | None = None
+        if creds is not None:
+            record = token_store.find_by_token(creds.credentials)
+            if record is not None:
+                api_token_id = record.get("id")
         registry = TokenRegistry()
-        new = registry.register(body.token, body.platform, body.device_label)
+        new = registry.register(
+            body.token,
+            body.platform,
+            body.device_label,
+            api_token_id=api_token_id,
+        )
         return {
             "ok": True,
             "newly_registered": new,
@@ -526,6 +577,79 @@ def create_app(config: Config) -> FastAPI:
         registry = TokenRegistry()
         removed = registry.unregister(token)
         return {"ok": True, "removed": removed}
+
+    @app.get(
+        "/api/v1/push/preferences",
+        tags=["push"],
+    )
+    def push_preferences_get(
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    ) -> dict[str, Any]:
+        """Read the calling device's notification preferences.
+
+        We don't gate this through `require_push` because we need to
+        identify the *specific* token making the call so we can return
+        ITS prefs — not arbitrary devices. The admin token has no
+        per-device prefs, so it gets defaults back.
+        """
+        if creds is None or creds.scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing Bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        record = token_store.find_by_token(creds.credentials)
+        if record is None:
+            # Admin token (or no per-device tokens at all) — return defaults.
+            from watchlog.auth import _default_notification_prefs
+            return _default_notification_prefs()
+        return token_store.get_preferences(record["id"])
+
+    @app.patch(
+        "/api/v1/push/preferences",
+        tags=["push"],
+    )
+    def push_preferences_patch(
+        body: NotificationPreferencesPayload,
+        request: Request,
+        creds: HTTPAuthorizationCredentials | None = Depends(SECURITY),
+    ) -> dict[str, Any]:
+        """Update the calling device's notification preferences. Same
+        identification rationale as the GET: we change the specific
+        token that authenticated this request, not arbitrary devices.
+
+        Unset fields are ignored (PATCH semantics) — clients can update
+        a single knob (e.g. flip quiet_hours_enabled) without resending
+        the full blob.
+        """
+        if creds is None or creds.scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing Bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        record = token_store.find_by_token(creds.credentials)
+        if record is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="The admin token has no per-device preferences. "
+                       "Pair a device first.",
+            )
+        # Only forward fields the client actually sent.
+        partial = body.model_dump(exclude_none=True)
+        # Normalize severity strings to upper case so the FCM filter
+        # treats "warn" and "WARN" the same way.
+        for key in ("quiet_min_severity", "min_severity"):
+            if key in partial and isinstance(partial[key], str):
+                partial[key] = partial[key].upper()
+        merged = token_store.update_preferences(record["id"], partial)
+        if merged is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Token disappeared",
+            )
+        return merged
 
     @app.get(
         "/api/v1/push/devices",

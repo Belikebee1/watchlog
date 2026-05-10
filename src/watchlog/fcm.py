@@ -61,18 +61,39 @@ class TokenRegistry:
             except OSError:
                 pass
 
-    def register(self, token: str, platform: str = "unknown",
-                 device_label: str | None = None) -> bool:
-        """Add or refresh a device token. Returns True if newly added."""
+    def register(
+        self,
+        token: str,
+        platform: str = "unknown",
+        device_label: str | None = None,
+        api_token_id: str | None = None,
+    ) -> bool:
+        """Add or refresh a device token. Returns True if newly added.
+
+        api_token_id ties an FCM token back to the per-device API token
+        that owns it (see auth.TokenStore). The FCM sender uses this
+        link to resolve quiet-hours and severity-floor preferences
+        before deciding to deliver a push.
+        """
         new = token not in self._tokens
         self._tokens[token] = {
             "token": token,
             "platform": platform,
             "device_label": device_label,
+            "api_token_id": api_token_id,
             "registered_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save()
         return new
+
+    def api_token_id_for(self, fcm_token: str) -> str | None:
+        """Resolve the API token id that owns this FCM token, or None
+        if the FCM token isn't registered or predates the api_token_id
+        linkage."""
+        entry = self._tokens.get(fcm_token)
+        if entry is None:
+            return None
+        return entry.get("api_token_id")
 
     def unregister(self, token: str) -> bool:
         if token in self._tokens:
