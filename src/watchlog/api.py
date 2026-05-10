@@ -79,6 +79,7 @@ from watchlog.auth import (
 from watchlog.check_info import CHECK_INFO, SEVERITY_LEGEND
 from watchlog.core.config import Config
 from watchlog.fcm import TokenRegistry
+from watchlog.host_info import collect_host_info
 from watchlog.state import State
 
 log = logging.getLogger(__name__)
@@ -427,6 +428,20 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/v1/state", tags=["state"], dependencies=[Depends(require_read)])
     def get_state() -> dict[str, Any]:
         return State.load().to_dict()
+
+    # --------------- protected — host metadata ---------------
+
+    @app.get(
+        "/api/v1/host",
+        tags=["meta"],
+        dependencies=[Depends(require_read)],
+    )
+    def get_host_info() -> dict[str, Any]:
+        """Static-ish host info: hostname, OS release, kernel, RAM/disk
+        totals, uptime, IPs. Mobile renders this as a server-detail
+        header so the user can quickly see *which* box they're looking
+        at without grepping through check titles."""
+        return collect_host_info()
 
     # --------------- protected — check explainers ---------------
 
