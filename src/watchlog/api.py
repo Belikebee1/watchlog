@@ -424,15 +424,49 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/api/v1/reports", tags=["reports"], dependencies=[Depends(require_read)])
     def list_reports() -> dict[str, Any]:
+        """Calendar view of past runs. Each day is summarized with the
+        worst severity seen, the count of runs, and the latest run
+        timestamp — enough for the mobile history browser to color the
+        date list without a per-day round-trip."""
         log_dir = Path(config.get("state", "log_dir", default="/var/log/watchlog") or
                        "/var/log/watchlog")
         if not log_dir.is_dir():
             return {"days": []}
-        days = sorted(
-            (p.stem for p in log_dir.glob("*.json") if p.stem != "status"),
+
+        sev_rank = {"OK": 0, "INFO": 1, "WARN": 2, "CRITICAL": 3}
+        sev_name = {0: "OK", 1: "INFO", 2: "WARN", 3: "CRITICAL"}
+
+        summaries: list[dict[str, Any]] = []
+        for path in sorted(
+            (p for p in log_dir.glob("*.json") if p.stem != "status"),
+            key=lambda p: p.stem,
             reverse=True,
-        )
-        return {"days": days[:90]}
+        )[:90]:
+            try:
+                runs = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(runs, list):
+                continue
+            worst_rank = 0
+            last_ran_at: str | None = None
+            for run in runs:
+                last_ran_at = run.get("ran_at") or last_ran_at
+                for r in run.get("results", []):
+                    rank = sev_rank.get(r.get("severity"), 0)
+                    if rank > worst_rank:
+                        worst_rank = rank
+            summaries.append({
+                "date": path.stem,
+                "worst_severity": sev_name[worst_rank],
+                "runs": len(runs),
+                "last_ran_at": last_ran_at,
+            })
+        # Backwards compat: keep the flat 'days' list (old clients).
+        return {
+            "days": [s["date"] for s in summaries],
+            "summaries": summaries,
+        }
 
     @app.get(
         "/api/v1/reports/{date}",
