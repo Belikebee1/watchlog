@@ -624,6 +624,71 @@ def create_app(config: Config) -> FastAPI:
         audit("ACTION_APPLY_SECURITY")
         return _run_command(["unattended-upgrade", "-v"])
 
+    # --------------- protected — audit log (Phase 3Q) ----------------------
+
+    @app.get(
+        "/api/v1/audit",
+        tags=["meta"],
+        dependencies=[Depends(require_read)],
+    )
+    def audit_list(
+        limit: int = 200,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        """Return recent entries from /var/log/watchlog/audit.log.
+
+        Mobile clients use this to surface 'what did I just do' lists
+        (per-server action history). The log is newline-delimited
+        JSON; this endpoint reads from the end of the file rather
+        than parsing the whole thing.
+
+        Query params:
+          limit (int, 1..1000)   default 200, capped server-side
+          kind  (str, optional)  match events whose 'event' field
+                                 starts with this prefix. Examples:
+                                 'ACTION_' for action shortcuts only,
+                                 'TOKEN_'  for pairing/revoke trail.
+        """
+        from watchlog.auth import AUDIT_PATH  # noqa: PLC0415
+        limit = max(1, min(int(limit), 1000))
+
+        if not AUDIT_PATH.is_file():
+            return {"entries": [], "total": 0}
+
+        # Read the last N lines without loading the whole file.
+        # 200 lines * ~250 bytes ≈ 50 KB → reading the last 256 KB
+        # window is plenty even for verbose deployments.
+        try:
+            file_size = AUDIT_PATH.stat().st_size
+            with AUDIT_PATH.open("rb") as fh:
+                window = min(file_size, 256 * 1024)
+                fh.seek(file_size - window)
+                tail = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return {"entries": [], "total": 0}
+
+        # Drop a potentially-partial first line when we didn't read
+        # from byte 0 — it's the cut-off prefix of an earlier event.
+        lines = tail.splitlines()
+        if window < file_size and lines:
+            lines = lines[1:]
+
+        entries: list[dict[str, Any]] = []
+        for line in reversed(lines):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if kind and not str(rec.get("event", "")).startswith(kind):
+                continue
+            entries.append(rec)
+            if len(entries) >= limit:
+                break
+
+        return {"entries": entries, "total": len(entries)}
+
     # --------------- protected — service / host actions (Phase 2D) ---------
 
     @app.get(
