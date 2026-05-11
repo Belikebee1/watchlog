@@ -159,6 +159,13 @@ class NotificationPreferencesPayload(BaseModel):
         description="Checks to mute. If every actionable check in a run "
                     "is on this list, the device gets no push.",
     )
+    cooldown_hours: int | None = Field(
+        None,
+        ge=0,
+        le=168,
+        description="Smart grouping window: a (check, severity) combo "
+                    "won't push twice within this many hours. 0 disables.",
+    )
 
 
 class PairRequest(BaseModel):

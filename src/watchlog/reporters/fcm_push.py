@@ -22,6 +22,7 @@ from watchlog.core.check import CheckResult
 from watchlog.core.runner import register_reporter
 from watchlog.core.severity import Severity
 from watchlog.fcm import FcmSender, TokenRegistry
+from watchlog.notifications import NotificationStateStore
 from watchlog.reporters.base import Reporter
 from watchlog.state import State
 
@@ -70,25 +71,53 @@ class FcmPushReporter(Reporter):
         # by an older mobile build) get the defaults — same behavior as
         # before this knob existed.
         token_store = TokenStore()
+        notifications = NotificationStateStore()
         delivery_targets: list[str] = []
-        suppressed = 0
+        # Track per-target what the reporter will record on successful
+        # send. Mapping fcm_token → (api_token_id, [(check, severity)]).
+        record_plans: dict[str, tuple[str, list[tuple[str, str]]]] = {}
+        suppressed_prefs = 0
+        suppressed_cooldown = 0
         actionable_check_names = [r.check_name for r in actionable]
+        actionable_pairs = [(r.check_name, r.severity.name) for r in actionable]
+
         for fcm_token in tokens:
             api_id = registry.api_token_id_for(fcm_token)
             prefs = token_store.get_preferences(api_id) if api_id else None
-            ok = prefs is None or should_deliver(
+
+            # Preferences filter (severity floor, quiet hours, disabled
+            # checks). Skips before consulting cooldown — saves a JSON
+            # read on muted devices.
+            if prefs is not None and not should_deliver(
                 prefs,
                 actual_worst.name,
                 actionable_checks=actionable_check_names,
-            )
-            if ok:
+            ):
+                suppressed_prefs += 1
+                continue
+
+            # Smart grouping (Phase 2H): suppress repeats within the
+            # device's cooldown window unless something escalated.
+            if api_id is None:
+                # Devices that predate api_token_id linkage skip the
+                # cooldown — old behaviour, no surprises.
                 delivery_targets.append(fcm_token)
-            else:
-                suppressed += 1
+                continue
+            cooldown = int((prefs or {}).get("cooldown_hours", 12))
+            decision = notifications.decide(
+                api_id, actionable_pairs, cooldown_hours=cooldown,
+            )
+            if not decision.deliver:
+                suppressed_cooldown += 1
+                continue
+            delivery_targets.append(fcm_token)
+            record_plans[fcm_token] = (api_id, actionable_pairs)
 
         if not delivery_targets:
             log.info(
-                "fcm_push: every device suppressed by preferences, skipping",
+                "fcm_push: every device suppressed (prefs=%d, cooldown=%d), "
+                "skipping",
+                suppressed_prefs, suppressed_cooldown,
             )
             return
 
@@ -111,8 +140,21 @@ class FcmPushReporter(Reporter):
             },
         )
         log.info(
-            "fcm_push: sent to %d/%d devices, %d invalid, %d suppressed",
-            successes, len(delivery_targets), len(invalid), suppressed,
+            "fcm_push: sent to %d/%d devices, %d invalid, %d prefs, "
+            "%d cooldown",
+            successes, len(delivery_targets), len(invalid),
+            suppressed_prefs, suppressed_cooldown,
         )
         if invalid:
             registry.remove_invalid(invalid)
+            # Record push state for devices that actually got the send.
+            # Note: we don't have per-token success info from FcmSender
+            # — for now treat 'not invalid' as 'delivered'. Idempotent
+            # record (same state written again) is harmless.
+            invalid_set = set(invalid)
+            for fcm_token, (api_id, pairs) in record_plans.items():
+                if fcm_token not in invalid_set:
+                    notifications.record_push(api_id, pairs)
+        else:
+            for api_id, pairs in record_plans.values():
+                notifications.record_push(api_id, pairs)

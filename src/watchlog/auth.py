@@ -119,6 +119,12 @@ def _default_notification_prefs() -> dict[str, Any]:
         # may still mention disabled checks in the title — we don't
         # rewrite per-device messages yet, that's a future refinement).
         "disabled_checks": [],
+        # Phase 2H: smart grouping cooldown. Within N hours since the
+        # last push for a given (check, severity), repeated alerts at
+        # the same level get suppressed. Escalation (severity went up)
+        # always bypasses. Set to 0 to disable cooldown entirely — every
+        # actionable run sends a push.
+        "cooldown_hours": 12,
     }
 
 
