@@ -36,6 +36,8 @@ def collect_host_info() -> dict[str, Any]:
     All fields are optional except `hostname` — if even that fails we
     fall back to "unknown" rather than 500-ing the API call.
     """
+    from watchlog import __version__ as _watchlog_version
+
     return {
         "hostname": _hostname(),
         "fqdn": _fqdn(),
@@ -50,6 +52,12 @@ def collect_host_info() -> dict[str, Any]:
         "boot_time_iso": _boot_time_iso(),
         "ip_addresses": _ip_addresses(),
         "timezone": _timezone(),
+        # Installed watchlog package version. The mobile app compares
+        # this against the GitHub Releases "latest" tag and shows an
+        # "Update available" banner when the server is behind. Old
+        # servers that pre-date this field will simply omit it; the
+        # mobile silently hides the banner in that case.
+        "watchlog_version": _watchlog_version,
     }
 
 
