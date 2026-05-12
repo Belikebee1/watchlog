@@ -36,24 +36,35 @@ SS_LINE = re.compile(
 PROC_RE = re.compile(r'"([^"]+)"')
 
 
-def _is_ephemeral_localhost(addr: str) -> bool:
-    """High random ports bound to localhost — runtime-internal stuff that varies
-    between restarts (containerd, vscode-server, dev runtimes). Not security-relevant."""
+def _is_skippable_localhost(addr: str) -> bool:
+    """Localhost-only bindings on user-space ports.
+
+    A new port on 127.0.0.1 / [::1] is NOT a security signal — an
+    attacker who can bind to localhost is already on the box. Tracking
+    these only generates noise: VS Code Remote, containerd, language
+    runtimes, dev servers, IPC sockets all bind random localhost ports
+    that bounce on every restart. The check now tracks only public-
+    facing changes (0.0.0.0:*, [::]:*), which is the real intrusion
+    signal.
+
+    Privileged ports (< 1024) on localhost stay tracked — something
+    rebinding 127.0.0.1:53 or :631 deserves attention even on loopback.
+    """
     if not addr.startswith(("127.", "[::1]:")):
         return False
     try:
         port = int(addr.rsplit(":", 1)[1])
     except (ValueError, IndexError):
         return False
-    # Linux ephemeral port range starts at 32768 by default.
-    return port >= 32768
+    return port >= 1024
 
 
 def _snapshot_ports() -> set[str]:
     """Return a set of ``addr|process`` strings — one per listening socket.
 
-    Filters out ephemeral high ports bound to localhost (containerd, IDE servers,
-    etc.) since they vary between restarts and aren't security-relevant.
+    Filters out non-privileged localhost-only bindings (containerd, IDE
+    servers, runtime IPC, etc.) since they vary between restarts and
+    aren't security-relevant — see [_is_skippable_localhost].
     """
     try:
         proc = subprocess.run(
@@ -72,7 +83,7 @@ def _snapshot_ports() -> set[str]:
         if not m:
             continue
         addr = m.group("addr")
-        if _is_ephemeral_localhost(addr):
+        if _is_skippable_localhost(addr):
             continue
         users = m.group("users") or ""
         # Use only the first (parent) process name. Daemons like Postfix spawn

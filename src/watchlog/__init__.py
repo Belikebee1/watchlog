@@ -1,3 +1,3 @@
 """watchlog — server health and security monitor."""
 
-__version__ = "0.5.2"
+__version__ = "0.5.3"
